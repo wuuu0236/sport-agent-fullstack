@@ -1,0 +1,36 @@
+# ---------- 密钥 / 环境变量（含 DeepSeek API Key，绝不可提交）----------
+.env
+.env.*
+!.env.example
+
+# ---------- Java / Spring Boot 构建产物 ----------
+target/
+*.class
+*.jar
+*.war
+
+# ---------- 前端 ----------
+node_modules/
+dist/
+.vite/
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ---------- 本地运行时数据（训练记录 / 会话 / 记忆快照）----------
+agent-service/data/
+
+# ---------- 日志 / 临时 ----------
+*.log
+build.log
+.DS_Store
+Thumbs.db
+
+# ---------- IDE ----------
+.idea/
+.vscode/
+*.iml

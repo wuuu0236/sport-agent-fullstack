@@ -1,0 +1,28 @@
+# 三服务编排（需各服务下提供 Dockerfile；开发阶段建议用 README 的「快速开始」分别启动）
+version: '3.8'
+
+services:
+  agent-service:
+    build: ./agent-service
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./agent-service:/app
+    command: uvicorn app:app --port 8001 --host 0.0.0.0
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    ports:
+      - "8080:8080"
+    depends_on:
+      - agent-service
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    restart: unless-stopped
