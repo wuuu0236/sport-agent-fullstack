@@ -59,6 +59,35 @@ def _fallback_plan(task: str) -> list:
     return [{"id": "s1", "agent": name, "input": task, "expect": "直接回答"}]
 
 
+# ---------------------------------------------------------------------------
+# 伤病/疼痛会诊：三 Agent 协作（检索 + 数据诱因 + 分诊），固定模板保证效果可复现
+# ---------------------------------------------------------------------------
+_INJURY_KW = (
+    "膝盖", "下背", "腰", "圆肩", "体态", "疼痛", "康复", "受伤", "筋膜",
+    "不适", "脚底", "脚踝", "跟腱", "拉伤", "扭伤", "酸", "疼",
+)
+
+
+def _is_injury(task: str) -> bool:
+    return any(k in task for k in _INJURY_KW)
+
+
+def _injury_plan(task: str) -> list:
+    """三 Agent 会诊：searcher 检索最新资料，analyst 排查训练数据诱因，
+    clinician 结合两者分诊（@s1/@s2 依赖引用由代码替换），危险信号强制建议就医。"""
+    return [
+        {"id": "s1", "agent": "searcher",
+         "input": f"{task}，帮我检索最新的康复与训练调整建议",
+         "expect": "最新康复资料"},
+        {"id": "s2", "agent": "analyst",
+         "input": "分析我最近的训练数据（跑量/配速/心率/负荷趋势），判断近期训练强度是否可能诱发伤病",
+         "expect": "训练数据诱因分析"},
+        {"id": "s3", "agent": "clinician",
+         "input": f"用户症状：{task}。请结合 @s1 的资料与 @s2 的训练分析，给出分诊、危险信号识别与康复建议；命中危险信号必须明确建议就医",
+         "expect": "分诊与康复建议"},
+    ]
+
+
 def _parse_plan(raw: str) -> list:
     """解析 LLM 返回的计划。容忍 markdown 代码块包裹；无效则返回 []。"""
     if not raw:
@@ -144,6 +173,10 @@ class SupervisorAgent:
 
     # ---------- 拆解（模型的判断）----------
     def _plan(self, task: str) -> list:
+        # 伤病/疼痛类固定走三 Agent 会诊（searcher 检索 + analyst 数据诱因 + clinician 分诊）：
+        # 效果稳定可复现，不依赖 LLM 拆解——保证用户每次看到一致的会诊链路。
+        if _is_injury(task):
+            return _injury_plan(task)
         if config.CONFIG.mock_mode:
             return _fallback_plan(task)
         catalog = "\n".join(f"- {a['name']}：{a['description']}" for a in agent_catalog())

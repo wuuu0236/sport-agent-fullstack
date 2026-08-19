@@ -168,6 +168,23 @@ start-all.bat
 
 ## 更新日志（迭代脉络）
 
+### 2026-08-19 前端重构 + 暗色主题 + 会话管理 + 训练图表 + 多 Agent 会诊
+
+**前端（Vue 3）**
+- **组件化重构**：656 行单文件 `Chat.vue` 拆为 7 个组件（HeaderBar / MessageList / ChatInput / Dropzone / AgentBoard / RecentSessions / ThemeSettings）+ 工具模块（markdown / image / wallpaper / session）；
+- **暗色主题 + 自定义壁纸**：全站颜色收敛为 CSS 变量（`styles/theme.css`）；右上角 🎨 设置弹窗可上传本地图片作全屏壁纸（canvas 压缩存 localStorage）或选 4 款预设渐变；
+- **会话管理**：左侧会话栏（新建/切换/删除），每个会话独立持久化；首条消息自动命名会话；旧单会话历史自动迁移；
+- **训练图表**：`/sessions` 接口增强返回结构化数据（配速/负荷/心率区间/动作明细），前端新增纯 SVG 折线图（配速/跑量/TRIMP 趋势）+ 心率区间 Z1-Z5 堆叠条；
+- 按钮「生成周报（多 Agent）」改为通用「多 Agent 协作」。
+
+**Agent 层（Python）**
+- **伤病三 Agent 会诊**：`orchestrator.py` 新增 `_injury_plan()`——输入命中伤病/疼痛关键词时，固定走 `searcher（检索资料）→ analyst（训练数据诱因排查）→ clinician（分诊+危险信号强制就医）` 三 Agent 协作，`@s1/@s2` 依赖引用由代码替换，效果稳定可复现；
+- `/sessions` 接口结构化增强（前端图表数据源）。
+
+**数据层（Python）**
+- `sport_data.py`：暂存队列加线程锁 + 每条记录唯一 `_staged_id`（按 id 精确清除，防并发误清他人暂存）；文件名时间戳加微秒（防同秒覆盖丢数据）；
+- `app.py /commit`：带 records 时按 `_staged_id` 精确清除本次确认的暂存。
+
 ### 2026-08-19 OCR 布局配对修复：左右两列截图标签-数值错位 → 坐标空间配对
 
 **问题**：华为/Keep 等训练截图是「左右两列」布局，旧 `ocr_image` 按行平铺拼接文本，

@@ -5,6 +5,8 @@
 """
 import json
 import datetime
+import threading
+import uuid
 from . import config
 
 # 心率 5 区模型（基于最大心率 HRmax 百分比）
@@ -29,12 +31,21 @@ def hr_zone(pct: float) -> str:
 # 这是 Supervisor 编排里子 Agent「独立工作空间（workspace:isolated）」的数据层实现：
 # recorder 等写库 Agent 只把解析结果放进暂存区，不直接污染真实训练库，
 # 由 Supervisor 综合后 /commit 统一落库（防解析误判，对应图片导入 P0-3 教训）。
+#
+# 并发安全（2026-08-19 修复）：
+#   · 所有对 _STAGED 的读写都走 _STAGED_LOCK（FastAPI 多线程下并发暂存/提交不丢不坏）；
+#   · 每条暂存记录带唯一 _staged_id：前端确认时按 id 精确清除自己的记录，
+#     不会把其他会话/请求的暂存一起清掉。
 # ---------------------------------------------------------------------------
 _STAGED = []
+_STAGED_LOCK = threading.Lock()
 
 
 def _stage(rec: dict) -> dict:
-    _STAGED.append(rec)
+    rec = dict(rec)  # 拷贝，避免外部继续修改污染暂存内容
+    rec["_staged_id"] = uuid.uuid4().hex
+    with _STAGED_LOCK:
+        _STAGED.append(rec)
     return rec
 
 
@@ -77,14 +88,18 @@ class SportStore:
                        "rpe": rpe, "note": note})
 
     def staged(self) -> list:
-        """当前暂存队列（供 Supervisor/前端确认用）。"""
-        return list(_STAGED)
+        """当前暂存队列快照（供 Supervisor/前端确认用）。"""
+        with _STAGED_LOCK:
+            return list(_STAGED)
 
     def commit_staged(self) -> int:
         """确认提交：把暂存记录全部落库，返回条数。"""
         n = 0
-        while _STAGED:
-            rec = _STAGED.pop(0)
+        while True:
+            with _STAGED_LOCK:
+                if not _STAGED:
+                    break
+                rec = _STAGED.pop(0)
             if rec.get("type") == "run":
                 self.add_run(rec["date"], rec.get("distance_km") or 0,
                              rec.get("duration_min") or 0, rec.get("avg_hr") or 0,
@@ -96,13 +111,23 @@ class SportStore:
             n += 1
         return n
 
-    def discard_staged(self) -> int:
-        n = len(_STAGED)
-        _STAGED.clear()
-        return n
+    def discard_staged(self, ids: list = None) -> int:
+        """清除暂存。ids=None 清空全部；传 _staged_id 列表时只清匹配项
+        （前端确认的那批记录），不影响其他会话/请求的暂存。返回清除条数。"""
+        with _STAGED_LOCK:
+            if ids is None:
+                n = len(_STAGED)
+                _STAGED.clear()
+                return n
+            id_set = set(ids)
+            keep = [r for r in _STAGED if r.get("_staged_id") not in id_set]
+            n = len(_STAGED) - len(keep)
+            _STAGED[:] = keep
+            return n
 
     def _save(self, rec):
-        stamp = datetime.datetime.now().strftime("%H%M%S")
+        # 微秒级时间戳：同一秒内多条记录（批量导入/连续提交）不会互相覆盖丢数据
+        stamp = datetime.datetime.now().strftime("%H%M%S%f")
         fn = self.dir / f"{rec['type']}_{rec['date']}_{stamp}.json"
         try:
             with open(fn, "w", encoding="utf-8") as f:

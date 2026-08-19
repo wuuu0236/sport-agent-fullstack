@@ -105,24 +105,46 @@ def route_only(req: RouteReq):
 
 @app.get("/sessions")
 def list_sessions(limit: int = 12):
-    """最近训练记录（供前端『最近训练』展示）。"""
+    """最近训练记录（供前端『最近训练』展示 + 训练图表可视化）。
+
+    新增结构化字段（前端画图表用）：
+      run      -> distance_km / duration_min / avg_hr / max_hr / pace_min_km / load / zones / rpe
+      strength -> exercises（动作明细）
+    summary 保留为人类可读文本，兼容旧前端。
+    """
+    from src.agents.coach_agent import _user_max_hr
     recs = _store.all()
     recs.sort(key=lambda r: r.get("date") or "", reverse=True)
     out = []
+    max_hr = _user_max_hr()
     for r in recs[:limit]:
         if r.get("type") == "run":
+            a = _store.analyze_run(r, max_hr)
             s = f"跑步 {r.get('distance_km')}km / {r.get('duration_min')}分"
             if r.get("avg_hr"):
                 s += f" / 平均心率{r.get('avg_hr')}"
+            out.append({
+                "type": "run", "date": r.get("date"), "summary": s,
+                "distance_km": r.get("distance_km"),
+                "duration_min": r.get("duration_min"),
+                "avg_hr": r.get("avg_hr"),
+                "max_hr": r.get("max_hr"),
+                "rpe": r.get("rpe"),
+                "pace_min_km": a["pace_min_km"],
+                "load": a["load"],
+                "zones": a["zones"],
+            })
         elif r.get("type") == "strength":
             exs = "、".join(
                 f"{e.get('name')}{e.get('sets')}×{e.get('reps')}×{e.get('weight_kg')}kg"
                 for e in r.get("exercises", [])
             )
             s = f"力量：{exs}"
+            out.append({"type": "strength", "date": r.get("date"), "summary": s,
+                        "exercises": r.get("exercises", [])})
         else:
             s = str(r.get("type", ""))
-        out.append({"type": r.get("type"), "date": r.get("date"), "summary": s})
+            out.append({"type": r.get("type"), "date": r.get("date"), "summary": s})
     return {"sessions": out}
 
 
@@ -166,12 +188,21 @@ def supervise(req: ChatReq, stream: int = 0):
 
 @app.post("/commit")
 def commit(req: dict = None):
-    """确认暂存记录入库。可带 records 直接保存，或确认全局暂存队列。"""
+    """确认暂存记录入库。可带 records 直接保存，或确认全局暂存队列。
+
+    带 records 时按每条记录的 _staged_id 精确清除对应暂存——只清「本次确认」的，
+    不误清其他会话/并发请求的暂存（旧实现 discard_staged() 全清，多用户会互相踩）。
+    """
     store = SportStore()
     if req and req.get("records"):
         r = _import_save({"records": req["records"]})
-        # 用户确认时若这些记录已在暂存队列里，清掉对应暂存
-        store.discard_staged()
+        ids = [rec.get("_staged_id") for rec in req["records"]
+               if rec.get("_staged_id")]
+        if ids:
+            store.discard_staged(ids)
+        else:
+            # 兼容旧调用：记录里没有 _staged_id（如直接 API 传的原始数据）时按旧语义清空
+            store.discard_staged()
         return r
     n = store.commit_staged()
     if n:
