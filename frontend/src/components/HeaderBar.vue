@@ -21,8 +21,8 @@ const emit = defineEmits<{ (e: 'openSettings'): void }>()
 <style scoped>
 header {
   font-weight: 600;
-  font-size: 18px;
-  padding-bottom: 12px;
+  font-size: 20px;
+  padding-bottom: 14px;
   border-bottom: 1px solid var(--border);
   display: flex;
   justify-content: space-between;
@@ -34,7 +34,7 @@ header {
   gap: 10px;
 }
 .conn {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 400;
   display: flex;
   align-items: center;
@@ -63,9 +63,9 @@ header {
   background: transparent;
   border: 1px solid var(--border);
   border-radius: 8px;
-  width: 32px;
-  height: 32px;
-  font-size: 15px;
+  width: 34px;
+  height: 34px;
+  font-size: 16px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;

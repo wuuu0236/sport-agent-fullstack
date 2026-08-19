@@ -59,6 +59,13 @@ export async function getSessions(limit = 12): Promise<{ sessions: any[] }> {
   return await resp.json()
 }
 
+// 长期记忆：USER（关于用户）/ MEMORY（助理笔记），工作台「记忆」模块用
+export async function getMemory(): Promise<{ user: string[]; memory: string[]; snapshot: string }> {
+  const resp = await fetch(`/agent/memory`)
+  if (!resp.ok) throw new Error('memory fetch failed')
+  return await resp.json()
+}
+
 // 确认暂存记录入库（主 Agent 编排后用户点「确认」→ 后端 /commit 落库）
 export async function commitRecords(records?: any[]): Promise<{ ok: boolean; msg?: string }> {
   const { data } = await http.post('/commit', records ? { records } : {})

@@ -148,6 +148,17 @@ def list_sessions(limit: int = 12):
     return {"sessions": out}
 
 
+@app.get("/memory")
+def memory_list():
+    """长期记忆查看（工作台「记忆」模块）：USER（关于用户）/ MEMORY（助理笔记）。"""
+    from src import memory as mem
+    return {
+        "user": mem.list_store("user") or [],
+        "memory": mem.list_store("memory") or [],
+        "snapshot": mem.snapshot_block(),
+    }
+
+
 @app.post("/import-image")
 def import_image(req: ImportReq):
     """训练截图导入：本地 OCR → 文字 → LLM 解析 → 暂存（不落库）。

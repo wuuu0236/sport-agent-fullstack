@@ -61,14 +61,14 @@ function truncate(s: string, n: number) {
 .board {
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 12px;
-  margin: 12px 0;
+  padding: 14px;
+  margin: 14px 0;
   background: color-mix(in srgb, var(--card) 85%, transparent);
 }
 .board-title {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   color: var(--accent);
 }
 .nodes {
@@ -79,7 +79,7 @@ function truncate(s: string, n: number) {
 .node {
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 8px 10px;
+  padding: 10px 12px;
   background: var(--node-bg);
 }
 .node.running {
@@ -94,13 +94,13 @@ function truncate(s: string, n: number) {
 .node-head {
   display: flex;
   justify-content: space-between;
-  font-size: 13px;
+  font-size: 14px;
 }
 .node-name {
   font-weight: 600;
 }
 .node-state {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
 }
 .node.running .node-state {
@@ -114,7 +114,7 @@ function truncate(s: string, n: number) {
 }
 .node-out {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
   white-space: pre-wrap;
   max-height: 80px;
@@ -125,8 +125,8 @@ function truncate(s: string, n: number) {
   background: color-mix(in srgb, var(--warn) 12%, var(--card));
   border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
   border-radius: 10px;
-  padding: 10px 12px;
-  font-size: 13px;
+  padding: 12px 14px;
+  font-size: 14px;
   line-height: 1.6;
   color: var(--text-soft);
 }
@@ -140,9 +140,9 @@ function truncate(s: string, n: number) {
   color: #fff;
   border: 0;
   border-radius: 8px;
-  padding: 6px 14px;
+  padding: 7px 16px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
 }
 .p-btn:hover {
   background: var(--accent-hover);

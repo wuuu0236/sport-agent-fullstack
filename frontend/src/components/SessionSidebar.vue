@@ -55,12 +55,12 @@ const emit = defineEmits<{
 }
 .new-btn {
   width: 100%;
-  padding: 9px 0;
+  padding: 10px 0;
   border: none;
   border-radius: 10px;
   background: var(--accent);
   color: #fff;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.12s, transform 0.06s;
@@ -85,7 +85,7 @@ const emit = defineEmits<{
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 9px 10px;
+  padding: 11px 10px;
   border-radius: 10px;
   cursor: pointer;
   border: 1px solid transparent;
@@ -103,7 +103,7 @@ const emit = defineEmits<{
   min-width: 0;
 }
 .item-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--text-soft);
   white-space: nowrap;
@@ -114,9 +114,9 @@ const emit = defineEmits<{
   color: var(--text);
 }
 .item-meta {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--faint);
-  margin-top: 2px;
+  margin-top: 3px;
 }
 .del {
   flex: none;

@@ -1,5 +1,5 @@
 <template>
-  <div class="layout" :style="wallpaperStyle">
+  <div class="chat-module">
     <!-- 左侧会话栏 -->
     <SessionSidebar
       :sessions="sessions"
@@ -9,10 +9,10 @@
       @delete="removeSession"
     />
 
-    <!-- 右侧主区 -->
+    <!-- 主聊天区 -->
     <main class="chat-page">
       <div class="chat">
-        <HeaderBar :conn="conn" :connText="connText" @openSettings="showSettings = true" />
+        <HeaderBar :conn="conn" :connText="connText" />
 
         <!-- 多 Agent 协作链路看板：Supervisor 主 Agent 派发的子 Agent 实时状态（动态） -->
         <AgentBoard
@@ -23,12 +23,6 @@
           @commit="doCommit"
           @dismissCommit="pendingCommit = null"
         />
-
-        <!-- 最近训练记录（持久化在后端，前端只读展示） -->
-        <RecentSessions :sessions="recentSessions" />
-
-        <!-- 训练数据图表（心率区间 / 配速 / 跑量 / 负荷趋势） -->
-        <TrainingCharts :sessions="recentSessions" />
 
         <MessageList :messages="messages" />
 
@@ -47,27 +41,20 @@
       </div>
     </main>
 
-    <!-- 外观设置（暗色主题 + 自定义壁纸） -->
-    <ThemeSettings
-      :open="showSettings"
-      :wallpaper="wallpaper"
-      @close="showSettings = false"
-      @setWallpaper="applyWallpaper"
-    />
+    <!-- 右侧用户画像：USER 长期记忆（关于你的身份/偏好/训练基线） -->
+    <UserProfileSidebar :entries="userMemory" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch, computed } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import HeaderBar from '../components/HeaderBar.vue'
 import MessageList from '../components/MessageList.vue'
 import ChatInput from '../components/ChatInput.vue'
 import Dropzone from '../components/Dropzone.vue'
 import AgentBoard from '../components/AgentBoard.vue'
-import RecentSessions from '../components/RecentSessions.vue'
-import TrainingCharts from '../components/TrainingCharts.vue'
-import ThemeSettings from '../components/ThemeSettings.vue'
 import SessionSidebar from '../components/SessionSidebar.vue'
+import UserProfileSidebar from '../components/UserProfileSidebar.vue'
 import type { Msg } from '../types'
 import type { SessionMeta } from '../utils/session'
 import {
@@ -82,8 +69,7 @@ import {
   saveMessages,
   migrateLegacyHistory,
 } from '../utils/session'
-import { sendChat, checkHealth, importImage, orchestrate, getSessions, commitRecords } from '../api/client'
-import { loadWallpaper, saveWallpaper, resolveWallpaperBackground } from '../utils/wallpaper'
+import { sendChat, checkHealth, importImage, orchestrate, commitRecords, getMemory } from '../api/client'
 
 // ---- 会话管理 ----
 const sessions = ref<SessionMeta[]>(listSessions())
@@ -156,31 +142,22 @@ function removeSession(id: string) {
   }
 }
 
-// ---- 外观：暗色主题（CSS 变量全局生效）+ 自定义壁纸 ----
-const showSettings = ref(false)
-const wallpaper = ref<string | null>(loadWallpaper())
-const wallpaperStyle = computed(() => resolveWallpaperBackground(wallpaper.value))
-function applyWallpaper(stored: string | null) {
-  wallpaper.value = stored
-  saveWallpaper(stored)
-}
-
-// 最近训练记录（从 agent-service /sessions 拉取，前端只读展示）
-const recentSessions = ref<any[]>([])
-async function loadSessions() {
-  try {
-    const d = await getSessions(12)
-    recentSessions.value = d.sessions || []
-  } catch {
-    recentSessions.value = []
-  }
-}
-
 const busy = ref(false)
 const uploading = ref(false)
 const conn = ref<'checking' | 'ok' | 'err'>('checking')
 const connText = ref('连接检测中')
 const fileInput = ref<HTMLInputElement | null>(null)
+
+// ---- 右侧用户画像：USER 长期记忆（关于你的身份/偏好/训练基线）----
+const userMemory = ref<string[]>([])
+async function loadUserMemory() {
+  try {
+    const d = await getMemory()
+    userMemory.value = d.user || []
+  } catch {
+    userMemory.value = []
+  }
+}
 
 // ---- 多 Agent 编排看板状态（动态：Supervisor 派发哪个子 Agent 就显示哪个）----
 const chainOrder = ref<string[]>([])
@@ -231,6 +208,7 @@ async function send(text: string) {
     messages.value.push({ role: 'assistant', text: '请求失败：' + String(e) })
   } finally {
     busy.value = false
+    loadUserMemory() // 对话可能触发记忆写入，刷新右侧用户画像
   }
 }
 
@@ -314,20 +292,16 @@ function onFileChange(e: Event) {
 onMounted(() => {
   ensureSession()
   refreshConn()
-  loadSessions()
+  loadUserMemory()
 })
 </script>
 
 <style scoped>
-/* 壁纸层：铺满全屏（背景图/渐变由内联样式注入） */
-.layout {
+.chat-module {
   display: flex;
-  min-height: 100vh;
-  background-color: var(--bg);
-  background-size: cover;
-  background-position: center;
-  background-attachment: fixed;
-  transition: background 0.2s;
+  flex: 1;
+  min-width: 0;
+  height: 100vh;
 }
 .chat-page {
   flex: 1;

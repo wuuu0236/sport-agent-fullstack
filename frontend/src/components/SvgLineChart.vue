@@ -26,7 +26,7 @@
       :key="i"
       :cx="p.x"
       :cy="p.y"
-      r="3"
+      r="3.5"
       :fill="color"
       class="dot"
     />
@@ -35,7 +35,7 @@
       v-for="(p, i) in pts"
       :key="'t' + i"
       :x="p.x"
-      :y="p.y - 8"
+      :y="p.y - 10"
       class="val"
       text-anchor="middle"
     >
@@ -53,12 +53,12 @@ const props = withDefaults(
     color?: string
     height?: number
   }>(),
-  { color: 'var(--accent)', height: 130 },
+  { color: 'var(--accent)', height: 180 },
 )
 
-const W = 340
+const W = 460
 const H = props.height
-const P = 24
+const P = 30
 
 const pts = computed(() => {
   const vals = props.values
@@ -105,7 +105,8 @@ function format(v: number) {
   stroke-width: 1.5;
 }
 .val {
-  font-size: 9px;
+  font-size: 11px;
   fill: var(--muted);
+  font-weight: 600;
 }
 </style>

@@ -53,26 +53,27 @@ watch(
   padding: 40px 0;
 }
 .empty-icon {
-  font-size: 44px;
-  margin-bottom: 12px;
+  font-size: 52px;
+  margin-bottom: 14px;
   opacity: 0.9;
 }
 .empty-title {
-  font-size: 16px;
+  font-size: 19px;
   font-weight: 600;
   color: var(--text-soft);
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 .empty-sub {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--faint);
 }
 .msg {
   max-width: 82%;
-  padding: 8px 12px;
+  padding: 10px 14px;
   border-radius: 12px;
   white-space: pre-wrap;
-  line-height: 1.55;
+  line-height: 1.6;
+  font-size: 15px;
   border: 1px solid transparent;
 }
 .msg.user {
@@ -88,14 +89,14 @@ watch(
   border-bottom-left-radius: 4px;
 }
 .role {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--faint);
-  margin-bottom: 2px;
+  margin-bottom: 3px;
 }
 .agent {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--faint);
-  margin-top: 4px;
+  margin-top: 5px;
 }
 /* Markdown 渲染样式 */
 .msg .text.md {
@@ -139,9 +140,9 @@ watch(
 }
 .msg .text.md code {
   background: var(--code-bg);
-  padding: 1px 5px;
+  padding: 1px 6px;
   border-radius: 4px;
-  font-size: 12px;
+  font-size: 13px;
   font-family: 'SFMono-Regular', Consolas, monospace;
   color: var(--pre-text);
 }

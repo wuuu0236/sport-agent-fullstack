@@ -100,40 +100,40 @@ const loadData = computed(() =>
 .charts {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin: 12px 0;
+  gap: 12px;
+  margin: 14px 0;
 }
 .board-title {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--accent);
 }
 .card {
   background: color-mix(in srgb, var(--card) 85%, transparent);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 12px 14px;
+  border-radius: 14px;
+  padding: 16px 18px;
 }
 .card-title {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
   display: flex;
   align-items: baseline;
   gap: 8px;
 }
 .card-title .sub {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
   color: var(--faint);
 }
 .zone-bar {
   display: flex;
-  height: 18px;
-  border-radius: 9px;
+  height: 26px;
+  border-radius: 13px;
   overflow: hidden;
   background: var(--bg-soft);
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 .zone-seg {
   height: 100%;
@@ -142,18 +142,18 @@ const loadData = computed(() =>
 .legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 16px;
+  gap: 8px 20px;
 }
 .lrow {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: 7px;
+  font-size: 13px;
   color: var(--text-soft);
 }
 .lrow .dot {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   flex: none;
 }
@@ -164,9 +164,9 @@ const loadData = computed(() =>
   font-weight: 600;
 }
 .no-data {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--faint);
-  padding: 10px 0;
+  padding: 14px 0;
   text-align: center;
 }
 </style>

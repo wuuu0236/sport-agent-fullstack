@@ -34,9 +34,9 @@ function onDrop(e: DragEvent) {
 .dropzone {
   border: 1.5px dashed var(--border);
   border-radius: 12px;
-  padding: 14px;
+  padding: 16px;
   text-align: center;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--muted);
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s;
