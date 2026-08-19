@@ -24,6 +24,20 @@ def hr_zone(pct: float) -> str:
     return "Z5最大" if pct >= 90 else "Z1恢复"
 
 
+# ---------------------------------------------------------------------------
+# 暂存队列（模块级，跨实例共享）：训练记录先「暂存」再「确认提交」。
+# 这是 Supervisor 编排里子 Agent「独立工作空间（workspace:isolated）」的数据层实现：
+# recorder 等写库 Agent 只把解析结果放进暂存区，不直接污染真实训练库，
+# 由 Supervisor 综合后 /commit 统一落库（防解析误判，对应图片导入 P0-3 教训）。
+# ---------------------------------------------------------------------------
+_STAGED = []
+
+
+def _stage(rec: dict) -> dict:
+    _STAGED.append(rec)
+    return rec
+
+
 class SportStore:
     """本地训练记录存储 + 分析。"""
 
@@ -49,6 +63,43 @@ class SportStore:
                "rpe": rpe, "note": note}
         self._save(rec)
         return rec
+
+    # ---------- 暂存（隔离工作空间的数据层：不落库，待确认）----------
+    def stage_run(self, date, distance_km, duration_min, avg_hr, max_hr,
+                  hr_series=None, rpe=0, note=""):
+        return _stage({"type": "run", "date": date, "distance_km": distance_km,
+                       "duration_min": duration_min, "avg_hr": avg_hr,
+                       "max_hr": max_hr, "hr_series": hr_series or [],
+                       "rpe": rpe, "note": note})
+
+    def stage_strength(self, date, exercises, rpe=0, note=""):
+        return _stage({"type": "strength", "date": date, "exercises": exercises,
+                       "rpe": rpe, "note": note})
+
+    def staged(self) -> list:
+        """当前暂存队列（供 Supervisor/前端确认用）。"""
+        return list(_STAGED)
+
+    def commit_staged(self) -> int:
+        """确认提交：把暂存记录全部落库，返回条数。"""
+        n = 0
+        while _STAGED:
+            rec = _STAGED.pop(0)
+            if rec.get("type") == "run":
+                self.add_run(rec["date"], rec.get("distance_km") or 0,
+                             rec.get("duration_min") or 0, rec.get("avg_hr") or 0,
+                             rec.get("max_hr") or 0, hr_series=rec.get("hr_series"),
+                             rpe=rec.get("rpe") or 0, note=rec.get("note") or "")
+            elif rec.get("type") == "strength":
+                self.add_strength(rec["date"], rec.get("exercises") or [],
+                                  rpe=rec.get("rpe") or 0, note=rec.get("note") or "")
+            n += 1
+        return n
+
+    def discard_staged(self) -> int:
+        n = len(_STAGED)
+        _STAGED.clear()
+        return n
 
     def _save(self, rec):
         stamp = datetime.datetime.now().strftime("%H%M%S")

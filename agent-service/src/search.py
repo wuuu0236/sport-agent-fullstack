@@ -1,23 +1,89 @@
-"""联网搜索：多后端 + 诚实降级（零第三方依赖，urllib 实现，与整个 MVP 一致）。
+"""联网搜索：多后端 + 查询变体 + 诚实降级（零第三方依赖，urllib 实现）。
 
-后端优先级：
-  1. Tavily（.env 配置 TAVILY_API_KEY 时）——真正的网页搜索，返回带摘要的结果。
-  2. 维基百科（免费无 key）——事实类查询兜底（什么是XX / 简介）。
-  3. 都不可用/无结果 → 返回空列表，由 research Agent 如实告知「未联网」，绝不编造。
+现实约束（实测确认）：免费无 key 的搜索源里，中文分词稳定可用的非常少——
+  · Bing RSS 可用但中文分词不稳：同一句话换几个词，结果可能完全漂移
+    （实测『马拉松赛事』→ 快手；『马拉松比赛 2026』→ 马拉松官网）。
+  · DuckDuckGo HTML 在本机网络环境超时；维基百科仅覆盖事实类。
 
-所有后端异常均捕获并降级，保证搜索失败不拖垮对话。
+因此做三层兜底：
+  1. Tavily（.env 配 TAVILY_API_KEY 时）——最稳，直接用它；
+  2. 无 key 时：确定性生成多个查询变体（去口语词 / 补年份 / 同义词替换），
+     每个变体各搜一次 Bing RSS，结果按 URL 去重合并——只要任一变体命中，
+     相关内容就进并集，交给 research Agent 在回答时筛掉无关项；
+  3. 全部无结果 → 维基百科再兜一层 → 仍空则由 research Agent 如实告知未联网。
 """
+import datetime
 import json
+import re
 import urllib.parse
 import urllib.request
 
 from . import config
 
+# 查询变体：去掉这些口语/限定词后，Bing 更可能命中核心实体
+_QUALIFIER_RE = re.compile(
+    r"最近的|最近|有哪些|有什么|什么|怎样|如何|怎么|帮我|请|一下|"
+    r"哪儿|哪里|能否|能不能|请问|查查|搜索|查一下")
 
-def search(query: str, limit: int = 5) -> list:
-    """返回 [{title, url, snippet}]；无法联网或无结果时返回 []。"""
+_YEAR_RE = re.compile(r"20\d\d")
+# 事件类词：命中才补「+年份」变体（Bing 对『名词 + 年份』分词更稳）
+_EVENT_RE = re.compile(r"赛事|比赛|马拉松|报名|越野|铁三|半马|全马|跑")
+# 同义词替换：实测 Bing 对『比赛』比『赛事』稳
+_SYNONYMS = (("赛事", "比赛"),)
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_tags(s: str) -> str:
+    return _TAG_RE.sub("", s)
+
+
+def _query_variants(q: str) -> list:
+    """确定性生成多个查询变体（不依赖 LLM，保证可复现、不会空结果）。"""
+    q = (q or "").strip()
+    if not q:
+        return []
+    year = str(datetime.date.today().year)
+    variants = [q]
+    stripped = _QUALIFIER_RE.sub("", q)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    if stripped and stripped != q:
+        variants.append(stripped)
+    # 事件类查询补年份版本
+    if _EVENT_RE.search(q):
+        for base in dict.fromkeys([stripped or q, q]):
+            if not _YEAR_RE.search(base):
+                variants.append(f"{base} {year}")
+    # 同义词替换版本（赛事→比赛）
+    for src, dst in _SYNONYMS:
+        for v in list(variants):
+            if src in v:
+                rep = v.replace(src, dst)
+                if rep not in variants:
+                    variants.append(rep)
+    return list(dict.fromkeys(variants))
+
+
+def search(query: str, limit: int = 8) -> list:
+    """返回 [{title, url, snippet}]；无法联网或无结果时返回 []。
+
+    无 key 时返回「多个查询变体的并集」（URL 去重，最多 16 条）。
+    关键：不按 limit 截断——否则前面变体的无关结果会顶掉后面命中变体的好结果
+    （实测『马拉松赛事』漂移到快手/双色球，只有『马拉松比赛 2026』命中官网）。
+    混合的少量无关项由 research Agent 在回答时筛掉。
+    """
     if config.CONFIG.TAVILY_API_KEY:
         return _tavily(query, limit)
+    seen, merged = set(), []
+    for v in _query_variants(query)[:6]:
+        for r in _bing(v, 3):
+            u = r.get("url")
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            merged.append(r)
+    if merged:
+        return merged[:16]
     return _wikipedia(query, limit)
 
 
@@ -30,6 +96,45 @@ def format_sources(results: list) -> str:
         snip = (r.get("snippet") or "").strip()[:300]
         lines.append(f"{i}. {r.get('title') or '(无标题)'}\n   {r.get('url') or ''}\n   {snip}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Bing RSS（免费，无 key）：中文/通用资讯覆盖广，作为 Tavily 的零成本兜底
+# ---------------------------------------------------------------------------
+def _bing(query: str, limit: int) -> list:
+    """走 Bing 的 format=rss 输出（标准 RSS XML，标准库解析，保持零依赖）。
+
+    www.bing.com 在国内会 302 到 cn.bing.com，urllib 自动跟随重定向；
+    带常规浏览器 UA 避免被当爬虫拒绝。
+    """
+    import html as _html
+
+    url = "https://www.bing.com/search?format=rss&q=" + urllib.parse.quote(query)
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/120.0 Safari/537.36"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            xml = resp.read().decode("utf-8", errors="replace")
+        from xml.etree import ElementTree as ET
+        root = ET.fromstring(xml)
+        out = []
+        for item in root.iter("item"):
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            desc = _strip_tags(item.findtext("description") or "")
+            if not title or not link:
+                continue
+            out.append({"title": _html.unescape(title),
+                        "url": link,
+                        "snippet": _html.unescape(desc)[:300]})
+            if len(out) >= limit:
+                break
+        return out
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------

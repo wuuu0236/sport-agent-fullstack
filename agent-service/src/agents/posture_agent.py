@@ -32,8 +32,8 @@ _RED = ["剧烈疼痛伴肿胀", "麻木 / 放射痛到腿", "休息 3 天无缓
         "关节明显红肿热", "外伤后无法负重"]
 
 
-class PostureAgent(BaseAgent):
-    name = "posture"
+class ClinicianAgent(BaseAgent):
+    name = "clinician"
     description = "体态修复专家：跑步膝/下背酸/圆肩等疼痛排查、康复动作、就医红线"
 
     def handle(self, msg: str, ctx=None) -> str:
@@ -76,3 +76,7 @@ class PostureAgent(BaseAgent):
         return (f"用户消息：{msg}\n"
                 f"你是体态修复专家，给出：①可能诱因 ②3-4 个居家康复动作 "
                 f"③明确就医红线（{red}）。强调不替代诊断。")
+
+
+# 兼容旧名（旧代码/外部可能仍引用 PostureAgent）
+PostureAgent = ClinicianAgent

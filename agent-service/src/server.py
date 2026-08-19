@@ -198,29 +198,40 @@ def _rule_parse_ocr(text: str) -> dict:
     m = _re.search(r"(\d+(?:\.\d+)?)\s*(?:km|公里|千米|KM)", text, _re.I)
     if m:
         d["distance_km"] = float(m.group(1))
+    # 时长：兼容「时长28」「30分钟」「28:30(MM:SS)」「1:02:30(HH:MM:SS)」。
+    # 不能把多个正则用 or 链合并后直接取组——match 对象只认「实际命中」那个正则的组，
+    # 命中第一个正则时 m.group(2)/group(3) 不存在，会 IndexError。故分两步匹配。
+    # 「运动时间: 00:47:22」走 MM:SS 分支且优先于全局 MM:SS，避免状态栏时间
+    # （如 00:12:46）抢匹配导致时长取错。
+    d["duration_min"] = 0.0
     m = (_re.search(r"时长[：:\s]*(\d+(?:\.\d+)?)", text)
          or _re.search(r"(\d+(?:\.\d+)?)\s*分钟?", text)
-         or _re.search(r"(\d{1,2})[：:](\d{2})(?:[：:](\d{2}))?", text)  # MM:SS 或 HH:MM:SS
          or _re.search(r"用时[：:\s]*(\d+(?:\.\d+)?)", text))
     if m:
-        if m.group(3) is not None:  # HH:MM:SS
-            d["duration_min"] = int(m.group(1)) * 60 + int(m.group(2)) + int(m.group(3)) / 60.0
-        elif m.group(2) is not None:  # MM:SS
-            d["duration_min"] = int(m.group(1)) + int(m.group(2)) / 60.0
-        else:
-            d["duration_min"] = float(m.group(1))
+        d["duration_min"] = float(m.group(1))
+    else:
+        m = (_re.search(r"运动时间[：:\s]*(\d{1,2})[：:](\d{2})(?:[：:](\d{2}))?", text)
+             or _re.search(r"(\d{1,2})[：:](\d{2})(?:[：:](\d{2}))?", text))  # MM:SS 或 HH:MM:SS
+        if m:
+            if m.group(3) is not None:  # HH:MM:SS
+                d["duration_min"] = int(m.group(1)) * 60 + int(m.group(2)) + int(m.group(3)) / 60.0
+            else:  # MM:SS
+                d["duration_min"] = int(m.group(1)) + int(m.group(2)) / 60.0
     m = _re.search(r"平均心率[：:\s]*(\d+)", text) or _re.search(r"avg_?hr[：:\s]*(\d+)", text, _re.I)
     if m:
         d["avg_hr"] = int(m.group(1) or m.group(2))
     m = _re.search(r"最大心率[：:\s]*(\d+)", text) or _re.search(r"max_?hr[：:\s]*(\d+)", text, _re.I)
     if m:
         d["max_hr"] = int(m.group(1) or m.group(2))
-    m = _re.search(r"配速[：:\s]*(\d+)[′'\"]?\s*(\d+)?", text) or _re.search(r"pace[：:\s]*(\d+(?:\.\d+)?)", text, _re.I)
+    # 配速：兼容中文「配速6'30"」（分+秒）与英文「pace5.5」（小数）。
+    # 同样分步匹配，避免 or 链合并后跨正则取组导致 IndexError。
+    m = _re.search(r"配速[：:\s]*(\d+)[′'\"]?\s*(\d+)?", text)
     if m:
-        if m.group(3):
-            d["pace_min_km"] = float(m.group(3))
-        else:
-            d["pace_min_km"] = round(int(m.group(1)) + int(m.group(2) or 0) / 60.0, 2)
+        d["pace_min_km"] = round(int(m.group(1)) + int(m.group(2) or 0) / 60.0, 2)
+    else:
+        m = _re.search(r"pace[：:\s]*(\d+(?:\.\d+)?)", text, _re.I)
+        if m:
+            d["pace_min_km"] = float(m.group(1))
     m = _re.search(r"rpe[：:\s]*(\d+)", text, _re.I) or _re.search(r"疲劳[：:\s]*(\d+)", text)
     if m:
         d["rpe"] = int(m.group(1) or m.group(2))

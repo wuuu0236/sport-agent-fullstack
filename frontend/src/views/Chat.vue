@@ -7,16 +7,23 @@
       </span>
     </header>
 
-    <!-- 多 Agent 协作链路看板：编排时实时显示 research -> coach -> writer 的状态 -->
+    <!-- 多 Agent 协作链路看板：Supervisor 主 Agent 派发的子 Agent 实时状态（动态） -->
     <div v-if="showBoard" class="board">
-      <div class="board-title">多 Agent 协作链路</div>
+      <div class="board-title">多 Agent 协作链路（Supervisor → 子 Agent）</div>
       <div class="nodes">
-        <div v-for="n in nodeOrder" :key="n" class="node" :class="chain[n].status">
+        <div v-for="n in chainOrder" :key="n" class="node" :class="chain[n].status">
           <div class="node-head">
-            <span class="node-name">{{ nodeLabel[n] }}</span>
+            <span class="node-name">{{ nodeLabel[n] || n }}</span>
             <span class="node-state">{{ stateText(chain[n].status) }}</span>
           </div>
           <div v-if="chain[n].output" class="node-out">{{ truncate(chain[n].output, 160) }}</div>
+        </div>
+      </div>
+      <div v-if="pendingCommit" class="pending">
+        📥 主 Agent 编排解析出 <b>{{ pendingCommit.count }}</b> 条训练记录（暂存，未落库）
+        <div class="pending-actions">
+          <button class="p-btn" @click="doCommit">确认入库</button>
+          <button class="p-btn ghost" @click="pendingCommit = null">暂不</button>
         </div>
       </div>
     </div>
@@ -30,10 +37,10 @@
       </div>
     </div>
 
-    <div class="messages">
+    <div class="messages" ref="msgBox">
       <div v-for="(m, i) in messages" :key="i" :class="['msg', m.role]">
         <div class="role">{{ m.role === 'user' ? '我' : '助理' }}</div>
-        <div class="text">{{ m.text }}</div>
+        <div class="text md" v-html="rendered(m.text)"></div>
         <div v-if="m.agent" class="agent">→ {{ m.agent }} agent</div>
       </div>
     </div>
@@ -67,8 +74,21 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch } from 'vue'
-import { sendChat, checkHealth, importImage, orchestrate, getSessions } from '../api/client'
+import { ref, reactive, onMounted, watch, nextTick } from 'vue'
+import MarkdownIt from 'markdown-it'
+import { sendChat, checkHealth, importImage, orchestrate, getSessions, commitRecords } from '../api/client'
+
+// Markdown 渲染：把 DeepSeek 输出的 Markdown（#、**、表格、--- 等）渲染成富文本
+// html:false 会转义原始 HTML，避免 LLM 输出里的标签造成 XSS
+const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
+function rendered(text: string): string {
+  if (!text) return ''
+  try {
+    return md.render(text)
+  } catch {
+    return text
+  }
+}
 
 interface Msg {
   role: 'user' | 'assistant'
@@ -100,6 +120,14 @@ watch(
   { deep: true },
 )
 
+// 自动下滑：新消息进来（聊天/图片导入/编排终稿）滚到底部，第一时间看到输出过程
+const msgBox = ref<HTMLElement | null>(null)
+async function scrollToBottom() {
+  await nextTick()
+  if (msgBox.value) msgBox.value.scrollTop = msgBox.value.scrollHeight
+}
+watch(messages, () => scrollToBottom())
+
 // 最近训练记录（从 agent-service /sessions 拉取，前端只读展示）
 const recentSessions = ref<any[]>([])
 async function loadSessions() {
@@ -117,23 +145,41 @@ const conn = ref<'checking' | 'ok' | 'err'>('checking')
 const connText = ref('连接检测中')
 const fileInput = ref<HTMLInputElement | null>(null)
 
-// ---- 多 Agent 编排看板状态 ----
-const nodeOrder = ['research', 'coach', 'writer'] as const
+// ---- 多 Agent 编排看板状态（动态：Supervisor 派发哪个子 Agent 就显示哪个）----
 const nodeLabel: Record<string, string> = {
-  research: 'research · 研究',
-  coach: 'coach · 教练分析',
-  writer: 'writer · 周报成文',
+  recorder: 'recorder · 记录',
+  analyst: 'analyst · 分析',
+  searcher: 'searcher · 搜索',
+  clinician: 'clinician · 康复排查',
+  expert: 'expert · 运动科学',
+  planner: 'planner · 计划编排',
+  memory: 'memory · 记忆',
+  scheduler: 'scheduler · 日程',
+  writer: 'writer · 润色',
+  general: 'general · 通用',
+  supervisor: 'supervisor · 主Agent',
 }
-const chain = reactive<Record<string, { status: string; output: string }>>({
-  research: { status: 'idle', output: '' },
-  coach: { status: 'idle', output: '' },
-  writer: { status: 'idle', output: '' },
-})
+const chainOrder = ref<string[]>([])
+const chain = reactive<Record<string, { status: string; output: string }>>({})
 const showBoard = ref(false)
 const orchestrating = ref(false)
+const pendingCommit = ref<{ count: number; records?: any[] } | null>(null)
+
+async function doCommit() {
+  const recs = pendingCommit.value?.records
+  try {
+    const r = await commitRecords(recs?.length ? recs : undefined)
+    messages.value.push({ role: 'assistant', text: r.msg || '已处理', agent: 'supervisor' })
+  } catch (e) {
+    messages.value.push({ role: 'assistant', text: '确认失败：' + String(e), agent: 'supervisor' })
+  }
+  pendingCommit.value = null
+}
 
 function stateText(s: string) {
-  return ({ idle: '等待', running: '执行中…', done: '完成' } as Record<string, string>)[s] || s
+  return (
+    ({ idle: '等待', running: '执行中…', done: '完成', failed: '失败' } as Record<string, string>)[s] || s
+  )
 }
 function truncate(s: string, n: number) {
   return s && s.length > n ? s.slice(0, n) + '…' : s || ''
@@ -170,7 +216,7 @@ async function send() {
   }
 }
 
-// 触发多 Agent 编排流水线：research -> coach -> writer，状态经 SSE 实时刷新看板
+// 触发多 Agent 主从编排：Supervisor 拆解 → 派发子 Agent → 回收 → 综合，SSE 实时刷新看板
 function triggerOrchestrate() {
   if (orchestrating.value) return
   const msg = input.value.trim() || '请帮我生成本周的个人训练周报'
@@ -178,20 +224,33 @@ function triggerOrchestrate() {
   input.value = ''
   showBoard.value = true
   orchestrating.value = true
-  for (const n of nodeOrder) chain[n] = { status: 'idle', output: '' }
+  pendingCommit.value = null
+  chainOrder.value = []
+  for (const k of Object.keys(chain)) delete chain[k]
   orchestrate(msg, (e) => {
-    if (e.type === 'agent_start' && e.agent) {
-      chain[e.agent] = { status: 'running', output: '' }
+    if (e.type === 'plan' && e.steps) {
+      // Supervisor 已拆解出子任务序列，预置看板槽位
+      chainOrder.value = e.steps
+      for (const n of e.steps) chain[n] = { status: 'idle', output: '' }
+    } else if (e.type === 'agent_start' && e.agent) {
+      if (!chain[e.agent]) {
+        chain[e.agent] = { status: 'running', output: '' }
+        if (!chainOrder.value.includes(e.agent)) chainOrder.value.push(e.agent)
+      } else {
+        chain[e.agent] = { status: 'running', output: '' }
+      }
     } else if (e.type === 'agent_done' && e.agent) {
       chain[e.agent] = { status: 'done', output: e.output || '' }
-      if (e.final) {
-        messages.value.push({
-          role: 'assistant',
-          text: e.output || '(无输出)',
-          agent: 'writer',
-        })
-        orchestrating.value = false
+    } else if (e.type === 'agent_error' && e.agent) {
+      // 单节点失败：看板标红，但不中断整条链；Supervisor 会如实注明缺失继续
+      chain[e.agent] = { status: 'failed', output: e.error || e.output || '节点失败' }
+    } else if (e.type === 'complete') {
+      if (e.output) {
+        messages.value.push({ role: 'assistant', text: e.output, agent: 'supervisor' })
       }
+      orchestrating.value = false
+    } else if (e.type === 'pending_commit' && e.count) {
+      pendingCommit.value = { count: e.count, records: e.records }
     } else if (e.type === 'error') {
       orchestrating.value = false
     }
@@ -365,6 +424,9 @@ header {
 .node.done {
   border-color: #2e9e4f;
 }
+.node.failed {
+  border-color: #d23b3b;
+}
 .node-head {
   display: flex;
   justify-content: space-between;
@@ -383,6 +445,9 @@ header {
 .node.done .node-state {
   color: #2e9e4f;
 }
+.node.failed .node-state {
+  color: #d23b3b;
+}
 .node-out {
   margin-top: 6px;
   font-size: 12px;
@@ -390,6 +455,33 @@ header {
   white-space: pre-wrap;
   max-height: 80px;
   overflow-y: auto;
+}
+.pending {
+  margin-top: 10px;
+  background: #fff8ec;
+  border: 1px solid #ffe2b8;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.pending-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+.p-btn {
+  background: #2f6df0;
+  color: #fff;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.p-btn.ghost {
+  background: #eef1f6;
+  color: #5b6577;
 }
 .messages {
   flex: 1;
@@ -423,6 +515,96 @@ header {
   font-size: 12px;
   color: #888;
   margin-top: 4px;
+}
+/* Markdown 渲染样式 */
+.msg .text.md {
+  white-space: normal;
+  display: block;
+}
+.msg .text.md :first-child {
+  margin-top: 0;
+}
+.msg .text.md :last-child {
+  margin-bottom: 0;
+}
+.msg .text.md h1,
+.msg .text.md h2,
+.msg .text.md h3 {
+  margin: 10px 0 6px;
+  line-height: 1.3;
+}
+.msg .text.md h1 {
+  font-size: 18px;
+}
+.msg .text.md h2 {
+  font-size: 16px;
+}
+.msg .text.md h3 {
+  font-size: 15px;
+}
+.msg .text.md p {
+  margin: 6px 0;
+}
+.msg .text.md ul,
+.msg .text.md ol {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+.msg .text.md li {
+  margin: 2px 0;
+}
+.msg .text.md strong {
+  font-weight: 700;
+}
+.msg .text.md code {
+  background: #e8e8ea;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+.msg .text.md pre {
+  background: #2b2b2b;
+  color: #f1f1f1;
+  padding: 10px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.msg .text.md pre code {
+  background: none;
+  color: inherit;
+  padding: 0;
+}
+.msg .text.md blockquote {
+  border-left: 3px solid #c4cdd6;
+  margin: 8px 0;
+  padding: 2px 12px;
+  color: #555;
+}
+.msg .text.md hr {
+  border: none;
+  border-top: 1px solid #ddd;
+  margin: 10px 0;
+}
+.msg .text.md table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.msg .text.md th,
+.msg .text.md td {
+  border: 1px solid #ddd;
+  padding: 5px 8px;
+  text-align: left;
+}
+.msg .text.md th {
+  background: #eef2f6;
+  font-weight: 600;
+}
+.msg .text.md a {
+  color: #185fa5;
 }
 .dropzone {
   border: 1.5px dashed #c4cdd6;

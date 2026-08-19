@@ -11,8 +11,13 @@
   GET  /sessions         {limit?}           -> {sessions:[{type,date,summary}]}  最近训练记录（供前端展示）
 """
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import base64
+import datetime
+import json
+import threading
+from queue import Queue
 
 from src import config, memory
 from src.supervisor import route
@@ -20,6 +25,7 @@ from src.agents import get_agent
 from src.skill_loader import match_skills
 from src.server import image_import, _import_save
 from src.sport_data import SportStore
+from src.orchestrator import SupervisorAgent
 
 _store = SportStore()
 
@@ -122,17 +128,100 @@ def list_sessions(limit: int = 12):
 
 @app.post("/import-image")
 def import_image(req: ImportReq):
-    """训练截图导入：本地 OCR → 文字 → LLM 解析 → 落库。
+    """训练截图导入：本地 OCR → 文字 → LLM 解析 → 暂存（不落库）。
 
-    比 MVP 的 /import_image 多一步：解析成功后真正写入训练记录（_import_save），
-    所以用户在「你记得我什么」里能看到这次导入。截图不外传，仅 OCR 文本送 LLM。
+    P0-3 修复：解析结果先进暂存区（workspace:isolated），返回 staged 标记，
+    由前端确认后调 /commit 落库——防止 OCR/LLM 误解析直接污染真实训练库。
+    截图不外传，仅 OCR 文本送 LLM。
     """
     res = image_import(req.image, req.mime)
     if res.get("ok") and res.get("data"):
         try:
-            _import_save({"data": res["data"]})
-            res["saved"] = True
-        except Exception as e:  # noqa: BLE001
+            staged = _stage_import_data(res["data"])
             res["saved"] = False
+            res["staged"] = staged
+        except Exception as e:  # noqa: BLE001
             res["save_error"] = str(e)
     return res
+
+
+@app.post("/supervise")
+def supervise(req: ChatReq, stream: int = 0):
+    """多 Agent 主从编排：主 Agent(Supervisor) 拆解→派发→回收→综合。
+
+    stream=1 → SSE 事件流（前端看板实时显示每个子 Agent 状态）；
+    默认 → 一次性 JSON（含 events 数组，便于测试/非 SSE 客户端）。
+    """
+    if stream:
+        return StreamingResponse(_supervise_stream(req.message),
+                                 media_type="text/event-stream")
+    events = []
+
+    def emit(e):
+        events.append(e)
+
+    final = SupervisorAgent().run(req.message, emit=emit)
+    return {"agent": "supervisor", "output": final, "events": events}
+
+
+@app.post("/commit")
+def commit(req: dict = None):
+    """确认暂存记录入库。可带 records 直接保存，或确认全局暂存队列。"""
+    store = SportStore()
+    if req and req.get("records"):
+        r = _import_save({"records": req["records"]})
+        # 用户确认时若这些记录已在暂存队列里，清掉对应暂存
+        store.discard_staged()
+        return r
+    n = store.commit_staged()
+    if n:
+        return {"ok": True, "msg": f"✅ 已确认入库 {n} 条训练记录"}
+    return {"ok": False, "msg": "暂存区为空，无需提交"}
+
+
+def _stage_import_data(data: dict) -> bool:
+    """把图片导入解析出的单条记录放进暂存队列（不落库）。"""
+    store = SportStore()
+    t = data.get("type")
+    date = data.get("date") or datetime.date.today().isoformat()
+    try:
+        if t == "run":
+            dist = float(data.get("distance_km") or 0)
+            dur = float(data.get("duration_min") or 0)
+            if dist > 0 and dur <= 0:
+                dur = round(dist * 6, 1)
+            store.stage_run(date, dist, dur, int(data.get("avg_hr") or 0),
+                            int(data.get("max_hr") or 0),
+                            hr_series=data.get("hr_series") or None,
+                            rpe=int(data.get("rpe") or 0),
+                            note=data.get("note") or "图片导入")
+            return True
+        elif t == "strength":
+            exs = data.get("exercises") or []
+            if exs:
+                store.stage_strength(date, exs, note=data.get("note") or "图片导入")
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _supervise_stream(task: str):
+    """SSE 生成器：线程跑 Supervisor，事件逐个 yield 成 SSE 帧。"""
+    q = Queue()
+
+    def emit(e):
+        q.put(e)
+
+    def worker():
+        try:
+            SupervisorAgent().run(task, emit=emit)
+        finally:
+            q.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+    while True:
+        e = q.get()
+        if e is None:
+            break
+        yield f"data: {json.dumps(e, ensure_ascii=False)}\n\n"

@@ -1,81 +1,94 @@
 package com.sportagent.orchestrator;
 
-import org.springframework.web.client.RestTemplate;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.util.LinkedHashMap;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.function.Consumer;
 
 /**
- * 多 Agent 编排层（手写版，预留 LangGraph4j 演进接口）。
+ * 多 Agent 编排层（薄转发版）。
  *
- * 当前实现一条线性流水线：research -> coach -> writer，每一步的产物喂给下一步，
- * 最终由 writer 综合成周报。通过 emit 回调把每个节点的「开始 / 完成」事件推给前端（SSE），
- * 从而让多 Agent 的协作过程肉眼可见——这是直接响应「多 Agent 到底有没有发挥作用」的诉求。
+ * 真正的多 Agent 机制在 Python agent-service 的 SupervisorAgent（主-从分发）：
+ * 主 Agent 用 LLM 拆解任务 → 显式派发给子 Agent（recorder/analyst/searcher/
+ * clinician/expert/planner/...）→ 回收摘要 → 综合成最终回答。
  *
- * 后续可平滑替换为 LangGraph4j 状态图：保持 run(message, emit) 签名不变，
- * 内部改用 StateGraph 定义节点与边即可，前端完全无需改动。
+ * 本类只做一件事：把前端的编排请求转发给 /supervise（SSE 事件流），
+ * 把 Python 逐事件推送的 start/plan/agent_start/agent_done/agent_error/
+ * complete/pending_commit 原样透传给前端。前端零改动——事件格式与旧流水线一致。
+ *
+ * 容错由 Python 侧承担（LLM 拆解失败回退模板计划；子 Agent 失败跳过并如实注明；
+ * 综合失败降级拼接子 Agent 产出）。本类只负责流式透传与连接兜底。
  */
 public class Orchestrator {
 
-    private final RestTemplate rest;
-    private static final String AGENT_BASE = "http://localhost:8001/agent/";
+    private static final String SUPERVISE_URL = "http://localhost:8001/supervise";
 
-    public Orchestrator(RestTemplate rest) {
-        this.rest = rest;
+    private static final int CONNECT_TIMEOUT_MS = 5_000;
+    // 覆盖整个编排时长（多 Agent 串行 + 各子 Agent 一次 LLM 调用）
+    private static final int READ_TIMEOUT_MS = 300_000;
+
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    public Orchestrator() {
     }
 
     public void run(String userMessage, Consumer<Map<String, Object>> emit) {
-        emit.accept(Map.of("type", "start"));
-
-        // 1) research：搜集训练理论 / 当下建议要点
-        emit.accept(stepEvent("agent_start", "research", 1, 3, null, false));
-        String research = callAgent("research", userMessage);
-        emit.accept(stepEvent("agent_done", "research", 1, 3, research, false));
-
-        // 2) coach：基于研究资料做个性化训练分析
-        emit.accept(stepEvent("agent_start", "coach", 2, 3, null, false));
-        String coach = callAgent("coach",
-                userMessage + "\n\n（参考研究资料）\n" + truncate(research, 1500));
-        emit.accept(stepEvent("agent_done", "coach", 2, 3, coach, false));
-
-        // 3) writer：综合研究 + 分析，产出训练周报
-        emit.accept(stepEvent("agent_start", "writer", 3, 3, null, false));
-        String report = callAgent("writer",
-                "请根据以下信息生成一份个人训练周报（结构化、口语化、可直接发给用户）。\n\n"
-                        + "用户需求：" + userMessage + "\n\n"
-                        + "研究要点：\n" + truncate(research, 1200) + "\n\n"
-                        + "训练分析：\n" + truncate(coach, 1200));
-        emit.accept(stepEvent("agent_done", "writer", 3, 3, report, true));
-
-        emit.accept(Map.of("type", "complete"));
-    }
-
-    private Map<String, Object> stepEvent(String type, String agent, int step, int total,
-                                          String output, boolean isFinal) {
-        Map<String, Object> m = new LinkedHashMap<>();
-        m.put("type", type);
-        m.put("agent", agent);
-        m.put("step", step);
-        m.put("total", total);
-        if (output != null) m.put("output", output);
-        if (isFinal) m.put("final", true);
-        return m;
-    }
-
-    private String callAgent(String name, String input) {
+        HttpURLConnection conn = null;
         try {
-            Map<String, String> body = Map.of("input", input);
-            Map<?, ?> resp = rest.postForObject(AGENT_BASE + name, body, Map.class);
-            Object out = resp != null ? resp.get("output") : null;
-            return out != null ? out.toString() : "";
+            URL url = new URL(SUPERVISE_URL + "?stream=1");
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            conn.setReadTimeout(READ_TIMEOUT_MS);
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+
+            String body = "{\"message\":" + mapper.writeValueAsString(userMessage) + "}";
+            conn.getOutputStream().write(body.getBytes(StandardCharsets.UTF_8));
+            conn.getOutputStream().flush();
+
+            // 逐事件透传：Python 的 SSE 帧以空行分隔，data: <json>
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
+            StringBuilder frame = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isEmpty()) {
+                    if (frame.length() > 0) {
+                        forward(frame.toString().trim(), emit);
+                        frame.setLength(0);
+                    }
+                } else {
+                    frame.append(line).append("\n");
+                }
+            }
+            reader.close();
         } catch (Exception e) {
-            return "[调用 " + name + " 失败: " + e.getMessage() + "]";
+            emit.accept(Map.of("type", "error", "message", e.getMessage()));
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
         }
     }
 
-    private String truncate(String s, int max) {
-        if (s == null) return "";
-        return s.length() <= max ? s : s.substring(0, max) + "…";
+    /** 解析单帧 SSE（data: <json>），原样转发给前端。 */
+    private void forward(String frame, Consumer<Map<String, Object>> emit) {
+        if (!frame.startsWith("data:")) {
+            return;
+        }
+        String json = frame.substring(5).trim();
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> ev = mapper.readValue(json, Map.class);
+            emit.accept(ev);
+        } catch (Exception ignored) {
+            // 坏帧丢弃，不影响整体流程
+        }
     }
 }

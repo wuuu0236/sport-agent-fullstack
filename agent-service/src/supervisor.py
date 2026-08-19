@@ -1,33 +1,34 @@
-"""Supervisor：意图路由 + skill 检测。优先 LLM 分类，无 key 时关键词兜底。"""
+"""Supervisor（轻量路由）：供 /chat 单 Agent 路径的一次性意图路由 + skill 检测。
+
+注意：真正的多 Agent 主从分发在 orchestrator.py 的 SupervisorAgent（/supervise）。
+这里保留的是「一条消息 → 一个 Agent」的快速路由，供普通问答使用。
+路由结果用新体系 agent 名（recorder/analyst/searcher/clinician/expert/planner/...）。
+"""
 from . import config, llm
-from .agents import get_agent, get_all_agents
+from .agents import get_agent, get_all_agents, agent_catalog
 from .skill_loader import match_skills
 
-ROUTING_PROMPT = """你是一个个人助理的调度器。根据用户消息，判断它属于哪个专业 Agent 的职责。
+_ROUTING_PROMPT_TMPL = """你是一个个人助理的调度器。根据用户消息，判断它属于哪个专业 Agent 的职责。
 可选 Agent 及其职责：
-- memory：记住/回忆关于用户的事实、偏好、待办
-- scheduler：设置提醒、日程、待办、每日简报
-- coach：训练记录录入、心率/配速分析、力量渐进超负荷、周期化计划
-- posture：跑步膝/下背/体态等疼痛排查、康复动作、就医红线
-- research：联网搜索资料、新闻、最新信息
-- writer：写、总结、润色、改文案
-- general：闲聊、通用问答、其他
+{catalog}
 只回复一个英文单词（agent 名称），不要解释。"""
 
 
 def route(user_msg: str) -> str:
     agents = get_all_agents()
     if config.CONFIG.mock_mode:
-        return _keyword_route(user_msg, agents)
+        return _keyword_route(user_msg)
     try:
+        catalog = "\n".join(f"- {a['name']}：{a['description']}" for a in agent_catalog())
         name = llm.chat(
-            [{"role": "system", "content": ROUTING_PROMPT}, {"role": "user", "content": user_msg}]
+            [{"role": "system", "content": _ROUTING_PROMPT_TMPL.format(catalog=catalog)},
+             {"role": "user", "content": user_msg}]
         ).strip().lower()
         if name in agents:
             return name
     except Exception:
         pass
-    return _keyword_route(user_msg, agents)
+    return _keyword_route(user_msg)
 
 
 def detect_skills(user_msg: str):
@@ -35,16 +36,40 @@ def detect_skills(user_msg: str):
     return match_skills(user_msg)
 
 
-def _keyword_route(msg: str, agents) -> str:
-    rules = [
-        (["记得", "记住", "回忆", "我的偏好", "别忘了", "记下"], "memory"),
-        (["提醒", "日程", "待办", "计划", "几点", "闹钟", "简报"], "scheduler"),
-        (["跑步", "心率", "配速", "力量", "深蹲", "卧推", "训练", "教练", "记录", "记一次", "渐进", "容量", "拉伸"], "coach"),
-        (["膝盖", "下背", "圆肩", "体态", "疼痛", "康复", "受伤", "筋膜", "不适"], "posture"),
-        (["搜", "查一下", "新闻", "资讯", "最新", "查查"], "research"),
-        (["写", "总结", "润色", "改", "文案", "起草", "帮我写"], "writer"),
-    ]
-    for kws, name in rules:
-        if any(k in msg for k in kws):
-            return name
+def _keyword_route(msg: str) -> str:
+    """关键词兜底路由（新体系 agent 名）。"""
+    # 元动作优先：记忆 / 日程
+    if any(k in msg for k in ("记得", "记住", "回忆", "我的偏好", "别忘了", "记下", "记着")):
+        return "memory"
+    if any(k in msg for k in ("提醒", "日程", "待办", "几点", "闹钟", "简报")):
+        return "scheduler"
+    # 记录训练（先于分析：『记一次5km』vs『分析我的跑步』）
+    has_record = any(k in msg for k in ("记一次", "记录", "保存", "入库", "添加"))
+    is_strength_fmt = ("组" in msg and "次" in msg and "kg" in msg)
+    if (has_record or is_strength_fmt) and (
+            "跑" in msg or "公里" in msg or "km" in msg.lower() or is_strength_fmt):
+        return "recorder"
+    # 分析数据
+    if any(k in msg for k in ("分析", "我的跑步", "进步", "趋势", "区间", "负荷",
+                              "查询", "显示", "最近一次", "配速")):
+        if any(k in msg for k in ("跑步", "心率", "力量", "深蹲", "卧推", "训练", "zone", "rpe")):
+            return "analyst"
+    # 联网搜索
+    if any(k in msg for k in ("搜", "查一下", "查查", "新闻", "资讯", "最新", "赛事",
+                              "马拉松", "比赛", "消息")):
+        return "searcher"
+    # 体态/疼痛（安全门控优先级高）
+    if any(k in msg for k in ("膝盖", "下背", "圆肩", "体态", "疼痛", "康复",
+                              "受伤", "筋膜", "不适", "脚底")):
+        return "clinician"
+    # 概念解释
+    if any(k in msg for k in ("是什么", "什么意思", "解释", "怎么理解", "含义",
+                              "区别", "为什么", "怎么算", "科普")):
+        return "expert"
+    # 计划/周报
+    if any(k in msg for k in ("周报", "计划", "周期", "编排", "生成", "目标")):
+        return "planner"
+    # 写作
+    if any(k in msg for k in ("写", "总结", "润色", "改", "文案", "起草")):
+        return "writer"
     return "general"

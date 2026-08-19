@@ -12,6 +12,16 @@
 """
 import base64
 import io
+import re
+
+# 布局配对参数（华为运动健康等「左右两列、标签在值上方」的训练截图布局）
+# 实测（2026-08，华为户外跑步小结 1080x2414）：标签与正下方数值 cy 差约 70~80px；
+# tab 栏标签（轨迹/配速/图表/详情）与下方时间戳 cy 差约 146px —— 用 110 阈值排除误配。
+_COL_TOL = 180    # 标签与值中心 x 的最大列偏差（两列中心相距约 470px，不会跨列误配）
+_ROW_GAP = 110    # 标签正下方取值的最大行距
+_DIGIT_RE = re.compile(r"\d")
+# 度量单位短词：可与邻近数值块合并（5.92 + 公里 → 5.92 公里），避免数字与单位被拆两行
+_UNIT_WORDS = {"公里", "千米", "米", "厘米", "千卡", "卡", "分钟", "小时", "秒", "步"}
 
 
 def _ensure_engine():
@@ -28,9 +38,12 @@ def _ensure_engine():
 
 
 def ocr_image(b64: str, mime: str = "image/png") -> str:
-    """把 base64 图片做 OCR，返回按阅读顺序拼接的纯文本。
+    """把 base64 图片做 OCR，返回结构化文本。
 
-    返回空字符串表示未识别到任何文字（例如纯曲线图）。
+    不再按行平铺：华为/Keep 等截图是「左右两列」布局，纯文本行拼接会把右列内容
+    插进左列标签与数值之间（实测『平均心率』后接『步数』，心率值 149 被挤到远处，
+    正则/LLM 取不到数字）。这里保留每个识别块的坐标，把标签与最近的数值块
+    空间配对，输出『平均心率: 149次/分钟』这种可直接解析的文本。
     """
     try:
         raw = base64.b64decode(b64)
@@ -52,8 +65,7 @@ def ocr_image(b64: str, mime: str = "image/png") -> str:
     if not boxes:
         return ""
 
-    # 按阅读顺序排：先按中心点 y（行），再按 x（列）
-    rows = []
+    blocks = []
     for item in boxes:
         # 兼容两种返回格式：[box, text, score] 或 [box, score, text]
         if len(item) < 3:
@@ -71,11 +83,82 @@ def ocr_image(b64: str, mime: str = "image/png") -> str:
             score = 1.0
         if score < 0.4:
             continue
-        ys = [p[1] for p in box]
         xs = [p[0] for p in box]
-        rows.append((sum(ys) / len(ys), sum(xs) / len(xs), text))
-    rows.sort(key=lambda r: (r[0] // 30, r[1]))  # 30px 内视为同一行
-    return "\n".join(t for _, _, t in rows)
+        ys = [p[1] for p in box]
+        blocks.append({
+            "cx": sum(xs) / len(xs),
+            "cy": sum(ys) / len(ys),
+            "text": text,
+        })
+    if not blocks:
+        return ""
+    return _assemble(blocks)
+
+
+def _assemble(blocks: list) -> str:
+    """按坐标把「标签块」与最近的「数值块」配对成 '标签: 值'，再按阅读顺序输出。
+
+    步骤：
+      1. 单位词并入邻近数值块（5.92 + 公里 → 5.92 公里）；
+      2. 标签（无数字块）→ 找最近的数值块：优先「正下方」（cx 同列、cy 在下且 < _ROW_GAP），
+         其次「同行右邻」（cy 同行、cx 在右且 < _COL_TOL）；
+      3. 未配对的数值块/标签按原样输出；整体按 (行, 列) 排序。
+    """
+    digit_blocks = [b for b in blocks if _DIGIT_RE.search(b["text"])]
+    text_blocks = [b for b in blocks if not _DIGIT_RE.search(b["text"])]
+
+    # 1) 单位词并入最近的邻近数值块
+    units = [b for b in text_blocks if b["text"] in _UNIT_WORDS]
+    labels = [b for b in text_blocks if b["text"] not in _UNIT_WORDS]
+    used_units = set()
+    for u in units:
+        best_i, best_d = None, 1e18
+        for i, v in enumerate(digit_blocks):
+            if abs(v["cy"] - u["cy"]) <= 60 and abs(v["cx"] - u["cx"]) <= 300:
+                d = abs(v["cy"] - u["cy"]) + abs(v["cx"] - u["cx"]) * 0.5
+                if d < best_d:
+                    best_i, best_d = i, d
+        if best_i is not None:
+            v = digit_blocks[best_i]
+            digit_blocks[best_i] = {**v, "text": f"{v['text']} {u['text']}"}
+            used_units.add(id(u))
+    leftover_units = [u for u in units if id(u) not in used_units]
+
+    # 2) 标签 → 最近数值块配对
+    used_digits = set()
+    lines = []
+    for lb in sorted(labels + leftover_units, key=lambda b: (b["cy"], b["cx"])):
+        best_i, best_d = None, 1e18
+        for i, v in enumerate(digit_blocks):
+            if i in used_digits:
+                continue
+            dx = v["cx"] - lb["cx"]
+            dy = v["cy"] - lb["cy"]
+            if abs(dy) <= 40 and 0 < dx <= _COL_TOL:        # 同行右邻
+                d = dx * 0.5 + abs(dy)
+            elif abs(dx) <= _COL_TOL and 0 < dy <= _ROW_GAP:  # 正下方
+                # x 偏差权重要高（*2）：同列优先——否则 y 略近但 x 偏远的干扰块
+                # （如孤立的 88）会抢走真正同列的值（如 167步/分钟）
+                d = dy + abs(dx) * 2
+            else:
+                continue
+            if d < best_d:
+                best_i, best_d = i, d
+        if best_i is not None:
+            used_digits.add(best_i)
+            v = digit_blocks[best_i]
+            lines.append((lb["cy"], lb["cx"], f"{lb['text']}: {v['text']}"))
+        else:
+            lines.append((lb["cy"], lb["cx"], lb["text"]))
+
+    # 3) 未配对的数值块原样输出
+    for i, v in enumerate(digit_blocks):
+        if i not in used_digits:
+            lines.append((v["cy"], v["cx"], v["text"]))
+
+    # 按阅读顺序：先按行（30px 内视为同一行），同行再按列
+    lines.sort(key=lambda t: (t[0] // 30, t[1]))
+    return "\n".join(t for _, _, t in lines)
 
 
 def parse_import_text(text: str) -> dict:

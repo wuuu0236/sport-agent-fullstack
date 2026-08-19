@@ -9,13 +9,25 @@ export interface ChatResp {
 }
 
 export interface OrchestrateEvent {
-  type: 'start' | 'agent_start' | 'agent_done' | 'complete' | 'error'
+  type:
+    | 'start'
+    | 'plan'
+    | 'agent_start'
+    | 'agent_done'
+    | 'agent_error'
+    | 'complete'
+    | 'pending_commit'
+    | 'error'
   agent?: string
   step?: number
   total?: number
   output?: string
   final?: boolean
+  status?: string
   message?: string
+  steps?: string[]
+  count?: number
+  records?: any[]
 }
 
 // 发一条消息给后端（Spring Boot /api/chat），后端透传到 Python agent-service
@@ -45,6 +57,12 @@ export async function getSessions(limit = 12): Promise<{ sessions: any[] }> {
   const resp = await fetch(`/agent/sessions?limit=${limit}`)
   if (!resp.ok) throw new Error('sessions fetch failed')
   return await resp.json()
+}
+
+// 确认暂存记录入库（主 Agent 编排后用户点「确认」→ 后端 /commit 落库）
+export async function commitRecords(records?: any[]): Promise<{ ok: boolean; msg?: string }> {
+  const { data } = await http.post('/commit', records ? { records } : {})
+  return data
 }
 
 // 多 Agent 编排流水线（SSE）：用 EventSource(GET) 订阅后端 /api/orchestrate 推送的状态事件。

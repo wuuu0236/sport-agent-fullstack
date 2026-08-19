@@ -42,4 +42,9 @@ class BaseAgent:
         if history:
             messages += history
         messages.append({"role": "user", "content": user_msg})
-        return llm.chat(messages)
+        reply = llm.chat(messages)
+        # 空串兜底（执行门控）：模型偶发返回空时，绝不能把「什么都没说」抛给用户/下游
+        if not (reply or "").strip():
+            return ("（模型本次未生成内容）可以换个说法再问，或明确告诉我你想做什么："
+                    "记录训练/分析数据/联网搜索/写文案。")
+        return reply
