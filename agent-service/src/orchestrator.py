@@ -156,6 +156,10 @@ class SupervisorAgent:
                 emit({"type": "agent_error", "agent": name, "step": i,
                       "total": len(plan), "error": str(e)})
 
+        # ---- 对弈式评审（Generator-Critic）：对最后一个成功产出评审，
+        #      planner 产出不合格则按评审意见重写一次（代码门控在质量维度的延伸）----
+        self._critic(task, plan, results, emit)
+
         final = self._synthesize(task, plan, results)
         # complete 事件携带最终输出 + final 标记（前端据此收尾渲染）
         emit({"type": "complete", "status": "ok" if final else "degraded",
@@ -179,6 +183,12 @@ class SupervisorAgent:
             return _injury_plan(task)
         if config.CONFIG.mock_mode:
             return _fallback_plan(task)
+        # 综合类任务（计划/周报/减脂/增肌…）强制走多步模板，确保体现多 Agent 协作价值：
+        # LLM 拆解有时会偷懒返回单步（只派 planner），用户就看不到 searcher→analyst→planner 接力。
+        if any(k in task for k in ("周报", "计划", "周期", "编排", "方案", "减脂",
+                                   "增肌", "训练计划", "周期化", "制定",
+                                   "训练方案", "健身计划")):
+            return _fallback_plan(task)
         catalog = "\n".join(f"- {a['name']}：{a['description']}" for a in agent_catalog())
         prompt = _PLAN_PROMPT.replace("{catalog}", catalog)
         try:
@@ -200,8 +210,14 @@ class SupervisorAgent:
                        or f"({m.group(1)} 无结果)")[:_REF_TRUNC],
             inp or "")
         agent = get_agent(name)
-        # 上下文隔离：子 Agent 各自带 system prompt + 记忆快照，不重复注入技能
-        out = agent.handle(inp, {"skills": []})
+        # 上下文隔离：子 Agent 各自带 system prompt，不重复注入技能；
+        # 且关掉短期历史(use_history=False)让前缀稳定、更易命中 DeepSeek 缓存，
+        # 记忆走按需召回(recall_mode="recall")只取最相关前 5 条，避免全量记忆重复计费。
+        # 主 Agent 仍走全量记忆 + 吃缓存折扣（见 supervisor/server 主路径）。
+        out = agent.handle(
+            inp,
+            {"skills": [], "use_history": False, "recall_mode": "recall"},
+        )
         if not (out or "").strip():
             raise ValueError(f"{name} 返回空输出")
         # 识别 BaseAgent._llm 的空串兜底文案 → 视为「模型未生成」，判为失败
@@ -209,6 +225,65 @@ class SupervisorAgent:
         if "（模型本次未生成内容）" in out:
             raise ValueError(f"{name} 模型未生成内容")
         return out
+
+    # ---------- 对弈式评审（Generator-Critic）----------
+    def _critic(self, task: str, plan: list, results: dict, emit) -> None:
+        """对最后一个成功产出做反向评审；planner 产出不合格则按意见重写一次。
+
+        评审是「代码门控」在质量维度的延伸：不止拦空输出/跑偏，还拦「答了但答得差」。
+        评审失败不中断链路（不通过也能继续，只是不重写非 planner 节点），保证永不空转。
+        """
+        last_step, last_out = self._last_success(plan, results)
+        if not last_out:
+            return
+        n = len(plan) + 1
+        emit({"type": "agent_start", "agent": "reviewer", "step": n, "total": n})
+        try:
+            review = get_agent("reviewer").handle(
+                f"用户需求：{task}\n\n待评审内容：\n{last_out}",
+                {"skills": [], "use_history": False, "recall_mode": "recall"})
+            emit({"type": "agent_done", "agent": "reviewer", "step": n, "total": n,
+                  "output": (review or "")[:200]})
+        except Exception as e:  # noqa: BLE001
+            emit({"type": "agent_error", "agent": "reviewer", "step": n, "total": n,
+                  "error": str(e)})
+            return
+        # 仅当「评审不过 + 被评节点是 planner」才重写一次（planner 产出本就是综合结果）
+        if not self._review_failed(review) or last_step["agent"] != "planner":
+            return
+        emit({"type": "agent_start", "agent": "planner", "step": n, "total": n})
+        try:
+            rewrite = get_agent("planner").handle(
+                f"请根据评审意见重写以下内容，修正所有问题：\n\n【评审意见】\n{review}\n\n【待重写内容】\n{last_out}",
+                {"skills": [], "use_history": False, "recall_mode": "recall"})
+            if (rewrite or "").strip() and "（模型本次未生成内容）" not in (rewrite or ""):
+                results[last_step["id"]] = {"agent": "planner", "output": rewrite}
+                emit({"type": "agent_done", "agent": "planner", "step": n, "total": n,
+                      "output": rewrite[:200]})
+            else:
+                emit({"type": "agent_error", "agent": "planner", "step": n, "total": n,
+                      "error": "重写失败（模型未生成），保留原产出"})
+        except Exception as e:  # noqa: BLE001
+            emit({"type": "agent_error", "agent": "planner", "step": n, "total": n,
+                  "error": str(e)})
+
+    @staticmethod
+    def _last_success(plan: list, results: dict):
+        """从 plan 里找最后一个成功产出的 (step, output)；无则 (None, None)。"""
+        for step in reversed(plan):
+            r = results.get(step["id"])
+            if r and r.get("output"):
+                return step, r["output"]
+        return None, None
+
+    @staticmethod
+    def _review_failed(review: str) -> bool:
+        """评审是否「不过」：仅首行 ISSUES 视为不过；评审异常/空/其他都视为通过
+        （评审失败不该惩罚已产出的内容，也不该引发重写风暴）。"""
+        s = (review or "").strip()
+        if not s or "（模型本次未生成内容）" in s:
+            return False
+        return s.startswith("ISSUES")
 
     # ---------- 综合（主 Agent 亲自收口）----------
     def _synthesize(self, task: str, plan: list, results: dict) -> str:
@@ -238,9 +313,15 @@ class SupervisorAgent:
         joined_short = "\n\n".join(joined)
         if config.CONFIG.mock_mode:
             return "主 Agent 已编排完成：\n\n" + joined_full
+        # 主 Agent 综合也必须结合用户画像（兜底）：planner 偶发失败时，
+        # 综合分支若不带画像，会生成忽略体态/伤病的计划，造成回归。
+        memory.load()
+        _items = memory.list_store("user") or []
+        _profile = "\n".join(f"- {p}" for p in _items) if _items else "（暂无用户画像）"
         sys = ("你是主 Agent（Supervisor）。以下是各子 Agent 完成的任务半成品。"
                "请把它们综合成一份对用户直接可用的完整回答：结构清晰、口语化、"
-               "如实引用真实产出；缺失的部分如实说明，不要编造。")
+               "如实引用真实产出；缺失的部分如实说明，不要编造。\n"
+               f"用户画像（含体态/伤病/心率基线，务必结合，不可忽略）：\n{_profile}")
         try:
             reply = llm.chat(
                 [{"role": "system", "content": sys},

@@ -67,13 +67,13 @@ function onPaste(e: ClipboardEvent) {
 }
 textarea {
   flex: 1;
-  height: 60px;
+  height: 66px;
   resize: none;
-  padding: 10px 12px;
+  padding: 11px 14px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   font-family: inherit;
-  font-size: 15px;
+  font-size: 16px;
   background: var(--bg-soft);
   color: var(--text);
   outline: none;
@@ -86,13 +86,13 @@ textarea::placeholder {
   color: var(--faint);
 }
 button {
-  padding: 0 22px;
+  padding: 0 24px;
   border: none;
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--accent);
   color: #fff;
   cursor: pointer;
-  font-size: 15px;
+  font-size: 16px;
   transition: background 0.12s;
 }
 button:hover:not(:disabled) {

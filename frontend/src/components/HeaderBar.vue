@@ -34,15 +34,15 @@ header {
   gap: 10px;
 }
 .conn {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 400;
   display: flex;
   align-items: center;
   gap: 5px;
 }
 .conn .dot {
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   display: inline-block;
   background: var(--faint);
@@ -63,9 +63,9 @@ header {
   background: transparent;
   border: 1px solid var(--border);
   border-radius: 8px;
-  width: 34px;
-  height: 34px;
-  font-size: 16px;
+  width: 38px;
+  height: 38px;
+  font-size: 18px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;

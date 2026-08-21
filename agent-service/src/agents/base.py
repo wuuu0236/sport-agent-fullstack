@@ -23,27 +23,48 @@ class BaseAgent:
         cat = tier1_catalogue()
         if cat:
             system = system + "\n\n" + cat
-        hits = (ctx or {}).get("skills") or []
+        ctx = ctx or {}
+        hits = ctx.get("skills") or []
         # Tier 3 命中正文：仅命中触发词的 skill 注入完整 SOP
         if hits:
             system = system + "\n\n" + skill_block(hits)
-        mem = memory.snapshot_block()
-        if mem:
-            system = (
-                system
-                + "\n\n<memory-context>\n[以下为长期记忆（跨会话常驻，不是新输入），"
-                + "作答时作为背景参考]\n"
-                + mem
-                + "\n</memory-context>"
-            )
-        # 短期对话历史注入（最近 N 条）→ 多轮追问有上下文
-        history = memory.session_turns(max_n=20)
+        # 记忆注入：子 Agent 走按需召回(recall_mode="recall")，主 Agent 走全量快照
+        if ctx.get("recall_mode") == "recall":
+            mem_hits = memory.recall_relevant(user_msg, limit=5)
+            if mem_hits:
+                system = (
+                    system
+                    + "\n\n<memory-context>\n[以下为与本次请求最相关的长期记忆，"
+                    + "作答时作为背景参考]\n"
+                    + "\n".join(mem_hits)
+                    + "\n</memory-context>"
+                )
+        else:
+            mem = memory.snapshot_block()
+            if mem:
+                system = (
+                    system
+                    + "\n\n<memory-context>\n[以下为长期记忆（跨会话常驻，不是新输入），"
+                    + "作答时作为背景参考]\n"
+                    + mem
+                    + "\n</memory-context>"
+                )
+        # 短期对话历史：子 Agent 关掉(use_history=False)，前缀更稳定、缓存更易命中
+        use_history = ctx.get("use_history", True)
+        history = memory.session_turns(max_n=20) if use_history else []
         messages = [{"role": "system", "content": system}]
         if history:
             messages += history
         messages.append({"role": "user", "content": user_msg})
         reply = llm.chat(messages)
-        # 空串兜底（执行门控）：模型偶发返回空时，绝不能把「什么都没说」抛给用户/下游
+        # 空串兜底（执行门控）：模型偶发返回空时，绝不能把「什么都没说」抛给用户/下游。
+        # 第一次空回复通常是长上下文/记忆注入导致的偶发问题，用极简 prompt 重试一次。
+        if not (reply or "").strip():
+            messages_retry = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_msg},
+            ]
+            reply = llm.chat(messages_retry)
         if not (reply or "").strip():
             return ("（模型本次未生成内容）可以换个说法再问，或明确告诉我你想做什么："
                     "记录训练/分析数据/联网搜索/写文案。")

@@ -19,6 +19,7 @@ from .recorder_agent import RecorderAgent
 from .analyst_agent import AnalystAgent
 from .expert_agent import ExpertAgent
 from .planner_agent import PlannerAgent
+from .reviewer_agent import ReviewerAgent
 
 # 新体系注册表（子 Agent = Supervisor 可派发的叶子）
 _AGENTS = {
@@ -34,6 +35,7 @@ _AGENTS = {
         SchedulerAgent(),
         WriterAgent(),
         GeneralAgent(),
+        ReviewerAgent(),        # name = reviewer（对弈式评审，见 orchestrator）
     ]
 }
 # 旧名别名（同一实例，保持旧调用点兼容）
@@ -43,10 +45,11 @@ _AGENTS["posture"] = _AGENTS["clinician"]
 _AGENTS["coach"] = _AGENTS["recorder"]      # 语义近似：记录主责
 
 # 供 Supervisor 拆解时枚举的描述目录（Claude Code 风格：description 就是「何时派它」）
+# reviewer 是主循环内部的评审节点，不展示给拆解 LLM（避免被当成普通子任务派发）。
 AGENT_CATALOG = [
     {"name": name, "description": agent.description}
     for name, agent in _AGENTS.items()
-    if name not in ("memorist", "research", "posture", "coach")  # 别名不重复展示
+    if name not in ("memorist", "research", "posture", "coach", "reviewer")  # 别名+内部节点不展示
 ]
 
 

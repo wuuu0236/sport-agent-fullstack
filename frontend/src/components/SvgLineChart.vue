@@ -26,7 +26,7 @@
       :key="i"
       :cx="p.x"
       :cy="p.y"
-      r="3.5"
+      r="4.5"
       :fill="color"
       class="dot"
     />
@@ -35,7 +35,7 @@
       v-for="(p, i) in pts"
       :key="'t' + i"
       :x="p.x"
-      :y="p.y - 10"
+      :y="p.y - 12"
       class="val"
       text-anchor="middle"
     >
@@ -105,7 +105,7 @@ function format(v: number) {
   stroke-width: 1.5;
 }
 .val {
-  font-size: 11px;
+  font-size: 12px;
   fill: var(--muted);
   font-weight: 600;
 }

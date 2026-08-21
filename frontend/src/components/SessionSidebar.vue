@@ -1,7 +1,15 @@
 <template>
-  <aside class="sidebar">
+  <!-- 折叠状态：窄竖条，点击展开 -->
+  <div v-if="collapsed" class="sidebar-collapsed" @click="collapsed = false" title="展开会话列表">
+    <span class="fold-icon">☰</span>
+    <span class="fold-label">会话</span>
+  </div>
+
+  <!-- 展开状态：完整侧栏 -->
+  <aside v-else class="sidebar">
     <div class="sidebar-head">
       <button class="new-btn" @click="emit('new')">＋ 新会话</button>
+      <button class="fold-btn" title="收起" @click="collapsed = true">◀</button>
     </div>
     <div class="list">
       <div
@@ -26,7 +34,17 @@
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
 import type { SessionMeta } from '../utils/session'
+
+const COLLAPSE_KEY = 'sport-session-sidebar-collapsed'
+function loadCollapsed(): boolean {
+  try {
+    return localStorage.getItem(COLLAPSE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
 
 defineProps<{
   sessions: SessionMeta[]
@@ -37,11 +55,48 @@ const emit = defineEmits<{
   (e: 'select', id: string): void
   (e: 'delete', id: string): void
 }>()
+
+const collapsed = ref(loadCollapsed())
+function toggle(c: boolean) {
+  collapsed.value = c
+  try {
+    localStorage.setItem(COLLAPSE_KEY, c ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+}
 </script>
 
 <style scoped>
+.sidebar-collapsed {
+  width: 40px;
+  flex: none;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding-top: 16px;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--bg-soft) 82%, transparent);
+  backdrop-filter: blur(14px);
+  border-right: 1px solid var(--border);
+  color: var(--muted);
+  transition: color 0.12s, background 0.12s;
+}
+.sidebar-collapsed:hover {
+  color: var(--accent);
+  background: var(--card-hover);
+}
+.fold-icon {
+  font-size: 18px;
+}
+.fold-label {
+  font-size: 12px;
+  writing-mode: vertical-rl;
+}
 .sidebar {
-  width: 240px;
+  width: 260px;
   flex: none;
   height: 100vh;
   display: flex;
@@ -52,15 +107,18 @@ const emit = defineEmits<{
 }
 .sidebar-head {
   padding: 14px 12px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .new-btn {
-  width: 100%;
-  padding: 10px 0;
+  flex: 1;
+  padding: 11px 0;
   border: none;
   border-radius: 10px;
   background: var(--accent);
   color: #fff;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.12s, transform 0.06s;
@@ -70,6 +128,22 @@ const emit = defineEmits<{
 }
 .new-btn:active {
   transform: scale(0.98);
+}
+.fold-btn {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.fold-btn:hover {
+  background: var(--card-hover);
+  color: var(--text);
 }
 .list {
   flex: 1;
@@ -103,7 +177,7 @@ const emit = defineEmits<{
   min-width: 0;
 }
 .item-title {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 500;
   color: var(--text-soft);
   white-space: nowrap;
@@ -114,7 +188,7 @@ const emit = defineEmits<{
   color: var(--text);
 }
 .item-meta {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--faint);
   margin-top: 3px;
 }

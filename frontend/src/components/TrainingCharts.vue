@@ -104,7 +104,7 @@ const loadData = computed(() =>
   margin: 14px 0;
 }
 .board-title {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--accent);
 }
@@ -112,28 +112,28 @@ const loadData = computed(() =>
   background: color-mix(in srgb, var(--card) 85%, transparent);
   border: 1px solid var(--border);
   border-radius: 14px;
-  padding: 16px 18px;
+  padding: 18px 20px;
 }
 .card-title {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
   display: flex;
   align-items: baseline;
   gap: 8px;
 }
 .card-title .sub {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 400;
   color: var(--faint);
 }
 .zone-bar {
   display: flex;
-  height: 26px;
-  border-radius: 13px;
+  height: 30px;
+  border-radius: 15px;
   overflow: hidden;
   background: var(--bg-soft);
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 .zone-seg {
   height: 100%;
@@ -142,18 +142,18 @@ const loadData = computed(() =>
 .legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 20px;
+  gap: 8px 22px;
 }
 .lrow {
   display: flex;
   align-items: center;
-  gap: 7px;
-  font-size: 13px;
+  gap: 8px;
+  font-size: 14px;
   color: var(--text-soft);
 }
 .lrow .dot {
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
   flex: none;
 }
@@ -164,9 +164,9 @@ const loadData = computed(() =>
   font-weight: 600;
 }
 .no-data {
-  font-size: 14px;
+  font-size: 15px;
   color: var(--faint);
-  padding: 14px 0;
+  padding: 16px 0;
   text-align: center;
 }
 </style>

@@ -87,9 +87,9 @@ onMounted(async () => {
   padding: 18px;
 }
 .card-title {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 .entries {
   display: flex;
@@ -97,18 +97,18 @@ onMounted(async () => {
   gap: 8px;
 }
 .entry {
-  font-size: 14px;
+  font-size: 15px;
   color: var(--text-soft);
   background: var(--bg-soft);
   border: 1px solid var(--border-soft);
   border-radius: 8px;
-  padding: 9px 12px;
-  line-height: 1.55;
+  padding: 10px 14px;
+  line-height: 1.6;
 }
 .empty {
-  font-size: 14px;
+  font-size: 15px;
   color: var(--faint);
-  padding: 14px 0;
+  padding: 16px 0;
 }
 .snapshot {
   margin-top: 14px;
@@ -119,19 +119,19 @@ onMounted(async () => {
 }
 .snapshot-body {
   margin: 0;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
   color: var(--text-soft);
   background: var(--bg-soft);
   border: 1px solid var(--border-soft);
   border-radius: 8px;
-  padding: 12px;
+  padding: 14px;
   white-space: pre-wrap;
   word-break: break-word;
 }
 .tip {
   margin-top: 14px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--faint);
 }
 </style>

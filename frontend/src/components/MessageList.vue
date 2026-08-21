@@ -8,9 +8,36 @@
       </div>
     </div>
     <div v-for="(m, i) in messages" :key="i" :class="['msg', m.role]">
-      <div class="role">{{ m.role === 'user' ? '我' : '助理' }}</div>
-      <div class="text md" v-html="renderMarkdown(m.text)"></div>
-      <div v-if="m.agent" class="agent">→ {{ m.agent }} agent</div>
+      <!-- 多 Agent 协作「思考过程」：内联在对话流里，可折叠 -->
+      <template v-if="m.role === 'thinking'">
+        <div class="role">🤔 多 Agent 协作过程</div>
+        <div class="thinking-card">
+          <div
+            v-for="s in (m.thinking?.steps || [])"
+            :key="s.name"
+            class="t-step"
+            :class="s.status"
+          >
+            <span class="t-dot"></span>
+            <span class="t-label">{{ s.label }}</span>
+            <span class="t-state">{{ stateText(s.status) }}</span>
+            <div v-if="s.output" class="t-out">{{ truncate(s.output, 120) }}</div>
+          </div>
+          <div v-if="pendingCommit" class="t-pending">
+            📥 主 Agent 解析出 <b>{{ pendingCommit.count }}</b> 条训练记录（暂存，未落库）
+            <div class="t-pending-actions">
+              <button class="t-btn" @click="$emit('commit')">确认入库</button>
+              <button class="t-btn ghost" @click="$emit('dismissCommit')">暂不</button>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <template v-else>
+        <div class="role">{{ m.role === 'user' ? '我' : '助理' }}</div>
+        <div class="text md" v-html="renderMarkdown(m.text || '')"></div>
+        <div v-if="m.agent" class="agent">→ {{ m.agent }} agent</div>
+      </template>
     </div>
   </div>
 </template>
@@ -20,7 +47,14 @@ import { ref, watch, nextTick } from 'vue'
 import { renderMarkdown } from '../utils/markdown'
 import type { Msg } from '../types'
 
-const props = defineProps<{ messages: Msg[] }>()
+const props = defineProps<{
+  messages: Msg[]
+  pendingCommit?: { count: number; records?: any[] } | null
+}>()
+const emit = defineEmits<{
+  (e: 'commit'): void
+  (e: 'dismissCommit'): void
+}>()
 
 // 自动下滑：新消息进来滚到底部，第一时间看到输出
 const msgBox = ref<HTMLElement | null>(null)
@@ -33,6 +67,16 @@ watch(
   () => scrollToBottom(),
   { deep: true },
 )
+
+// 子 Agent 状态文案（原 AgentBoard 逻辑迁移到内联思考过程）
+function stateText(s: string) {
+  return (
+    ({ idle: '等待', running: '执行中…', done: '完成', failed: '失败' } as Record<string, string>)[s] || s
+  )
+}
+function truncate(s: string, n: number) {
+  return s && s.length > n ? s.slice(0, n) + '…' : s || ''
+}
 </script>
 
 <style scoped>
@@ -53,27 +97,27 @@ watch(
   padding: 40px 0;
 }
 .empty-icon {
-  font-size: 52px;
-  margin-bottom: 14px;
+  font-size: 60px;
+  margin-bottom: 16px;
   opacity: 0.9;
 }
 .empty-title {
-  font-size: 19px;
+  font-size: 21px;
   font-weight: 600;
   color: var(--text-soft);
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 .empty-sub {
-  font-size: 14px;
+  font-size: 15px;
   color: var(--faint);
 }
 .msg {
-  max-width: 82%;
+  max-width: 84%;
   padding: 10px 14px;
   border-radius: 12px;
   white-space: pre-wrap;
   line-height: 1.6;
-  font-size: 15px;
+  font-size: 14px;
   border: 1px solid transparent;
 }
 .msg.user {
@@ -89,14 +133,115 @@ watch(
   border-bottom-left-radius: 4px;
 }
 .role {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--faint);
   margin-bottom: 3px;
 }
 .agent {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--faint);
   margin-top: 5px;
+}
+/* 内联「思考过程」卡片（替代原右侧 AgentBoard 模块） */
+.msg.thinking {
+  background: var(--assistant-msg);
+  border-color: var(--msg-border);
+  border-bottom-left-radius: 4px;
+  max-width: 92%;
+}
+.thinking-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+.t-step {
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 4px 0;
+}
+.t-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+.t-step.running .t-dot {
+  background: var(--node-running);
+  animation: tpulse 1.3s infinite;
+}
+.t-step.done .t-dot {
+  background: var(--node-done);
+}
+.t-step.failed .t-dot {
+  background: var(--node-failed);
+}
+@keyframes tpulse {
+  0% { box-shadow: 0 0 0 0 rgba(72, 187, 120, 0.45); }
+  70% { box-shadow: 0 0 0 5px rgba(72, 187, 120, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(72, 187, 120, 0); }
+}
+.t-label {
+  font-weight: 600;
+  color: var(--text-soft);
+}
+.t-state {
+  color: var(--muted);
+  font-size: 12px;
+}
+.t-step.running .t-state {
+  color: var(--node-running);
+}
+.t-step.done .t-state {
+  color: var(--node-done);
+}
+.t-step.failed .t-state {
+  color: var(--node-failed);
+}
+.t-out {
+  grid-column: 1 / -1;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+.t-pending {
+  margin-top: 6px;
+  background: color-mix(in srgb, var(--warn) 12%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-soft);
+}
+.t-pending-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 8px;
+}
+.t-btn {
+  background: var(--accent);
+  color: #fff;
+  border: 0;
+  border-radius: 8px;
+  padding: 5px 14px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.t-btn:hover {
+  background: var(--accent-hover);
+}
+.t-btn.ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.t-btn.ghost:hover {
+  color: var(--text);
 }
 /* Markdown 渲染样式 */
 .msg .text.md {
@@ -112,17 +257,17 @@ watch(
 .msg .text.md h1,
 .msg .text.md h2,
 .msg .text.md h3 {
-  margin: 10px 0 6px;
+  margin: 12px 0 7px;
   line-height: 1.3;
 }
 .msg .text.md h1 {
-  font-size: 18px;
+  font-size: 20px;
 }
 .msg .text.md h2 {
-  font-size: 16px;
+  font-size: 18px;
 }
 .msg .text.md h3 {
-  font-size: 15px;
+  font-size: 16px;
 }
 .msg .text.md p {
   margin: 6px 0;
@@ -142,7 +287,7 @@ watch(
   background: var(--code-bg);
   padding: 1px 6px;
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 14px;
   font-family: 'SFMono-Regular', Consolas, monospace;
   color: var(--pre-text);
 }
@@ -174,8 +319,8 @@ watch(
 .msg .text.md table {
   border-collapse: collapse;
   width: 100%;
-  margin: 8px 0;
-  font-size: 13px;
+  margin: 10px 0;
+  font-size: 14px;
 }
 .msg .text.md th,
 .msg .text.md td {

@@ -1,45 +1,45 @@
-/* 全局主题（暗色）：
+/* 全局主题（深色黑灰）：
    所有颜色收敛到 CSS 变量，组件里只引用 var()，换主题/换壁纸只改这里。
-   壁纸通过 --wallpaper 变量注入（由 ChatView 设置），背景图铺满聊天容器。 */
+   各模块主界面底色在 AppWorkbench.vue 的 .stage-* 上做色相微差。 */
 :root {
-  /* 背景与卡片 */
-  --bg: #0e1116;
-  --bg-soft: #141922;
-  --card: #1a202b;
-  --card-hover: #212936;
-  --border: #2a3242;
-  --border-soft: #232b39;
+  /* 背景与卡片（深色黑灰） */
+  --bg: #181b21;
+  --bg-soft: #23272e;
+  --card: #20242b;
+  --card-hover: #2a2f38;
+  --border: #333a44;
+  --border-soft: #2b313a;
 
-  /* 文本 */
-  --text: #e8ecf3;
-  --text-soft: #c3cad8;
-  --muted: #8791a5;
-  --faint: #5c6577;
+  /* 文本（浅色，深底可读） */
+  --text: #e7eaf0;
+  --text-soft: #b3bac4;
+  --muted: #828a95;
+  --faint: #5a626d;
 
   /* 品牌色 */
-  --accent: #4f8cff;
-  --accent-hover: #3d7bf0;
-  --accent-soft: #1d2b47;
-  --ok: #35c26b;
-  --warn: #e0a63c;
-  --danger: #e5534b;
-  --danger-soft: #3a2226;
+  --accent: #5b9bff;
+  --accent-hover: #4a8af0;
+  --accent-soft: #16243a;
+  --ok: #43c463;
+  --warn: #e0a83a;
+  --danger: #f0685f;
+  --danger-soft: #3a2525;
 
   /* 消息气泡 */
-  --user-msg: #23426e;
-  --assistant-msg: #1e2531;
-  --msg-border: #2b3445;
+  --user-msg: #2b4a78;
+  --assistant-msg: #23272e;
+  --msg-border: #343c47;
 
   /* 代码块 */
-  --code-bg: #262e3d;
-  --pre-bg: #12151c;
-  --pre-text: #d7dce6;
+  --code-bg: #161a20;
+  --pre-bg: #11151b;
+  --pre-text: #d7dce3;
 
   /* 看板状态 */
-  --node-bg: #171d28;
-  --node-running: #4f8cff;
-  --node-done: #35c26b;
-  --node-failed: #e5534b;
+  --node-bg: #20242b;
+  --node-running: #5b9bff;
+  --node-done: #43c463;
+  --node-failed: #f0685f;
 
   /* 壁纸（可选，由设置注入；无壁纸时显示纯色背景） */
   --wallpaper: none;
@@ -59,6 +59,7 @@ body,
 
 body {
   font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 16px;
   background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;

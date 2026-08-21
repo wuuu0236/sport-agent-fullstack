@@ -26,7 +26,7 @@
           <span class="preview-tip">当前壁纸（已压缩保存，刷新不丢）</span>
         </div>
         <div v-else class="wallpaper-empty">
-          未设置壁纸，使用暗色纯色背景。上传后自动铺满聊天区域。
+          未设置壁纸，使用深色纯色背景。上传后自动铺满聊天区域。
         </div>
         <div class="presets">
           <button

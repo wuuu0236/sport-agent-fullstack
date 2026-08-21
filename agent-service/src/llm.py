@@ -1,7 +1,53 @@
-"""LLM 调用层：OpenAI 兼容 chat/completions，无 key 时返回 mock 占位。"""
+"""LLM 调用层：OpenAI 兼容 chat/completions，无 key 时返回 mock 占位。
+
+容错策略（2026-08-20 优化）：
+- 网络/5xx 瞬时错误：指数退避重试（默认 3 次），避免偶发抖动直接把英文异常抛给用户；
+- 4xx（401 鉴权 / 400 参数 / 429 配额）不重试，直接降级——重试无意义且浪费配额；
+- 全部失败后降级为人类可读的提示，不再把原始异常堆栈甩给用户。
+"""
 import json
+import time
 import urllib.request
+from urllib.error import HTTPError, URLError
 from . import config
+
+# 重试参数
+_MAX_RETRIES = 3
+_BASE_DELAY_S = 0.6
+
+
+def _should_retry(exc: Exception) -> bool:
+    """判断错误是否值得重试：5xx 服务端错误 / 网络错误可重试；4xx 不重试。
+
+    注意：HTTPError 是 URLError 的子类，必须先判 HTTPError（有明确状态码），
+    否则 4xx 会被当成纯网络错误误重试。
+    """
+    if isinstance(exc, HTTPError):
+        return 500 <= exc.code < 600
+    if isinstance(exc, (URLError, TimeoutError)):
+        return True
+    return False
+
+
+def _post_json(url: str, payload: dict, timeout: int = 60) -> dict:
+    """带重试的 POST JSON，返回解析后的响应 dict。"""
+    last_exc = None
+    for attempt in range(_MAX_RETRIES + 1):
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", f"Bearer {config.CONFIG.LLM_API_KEY}")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            if not _should_retry(e) or attempt >= _MAX_RETRIES:
+                break
+            time.sleep(_BASE_DELAY_S * (2 ** attempt))
+    # 失败时抛统一异常（不在这里拼英文堆栈）
+    if isinstance(last_exc, HTTPError):
+        raise RuntimeError(f"LLM 接口返回 HTTP {last_exc.code}")
+    raise RuntimeError("LLM 接口请求失败（网络异常）")
 
 
 def chat(messages, model=None, temperature=0.7, max_tokens=1024):
@@ -15,15 +61,12 @@ def chat(messages, model=None, temperature=0.7, max_tokens=1024):
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {config.CONFIG.LLM_API_KEY}")
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        data = _post_json(url, payload)
         return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:  # 真实调用失败则降级到 mock，保证 MVP 不崩
-        return f"[LLM 调用失败，已降级 mock] {e}\n\n（请检查 .env 中的 LLM_API_KEY / LLM_BASE_URL）"
+    except Exception:  # noqa: BLE001
+        return ("（LLM 暂时不可用，已降级）请稍后再试，或检查 .env 中的 "
+                "LLM_API_KEY / LLM_BASE_URL 配置。")
 
 
 def _mock_chat(messages):
@@ -51,16 +94,12 @@ def vision(prompt, image_b64, mime="image/png", model=None, max_tokens=1024):
         "messages": [{"role": "user", "content": content}],
         "max_tokens": max_tokens,
     }
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {config.CONFIG.LLM_API_KEY}")
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        data = _post_json(url, payload)
         return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:  # 视觉调用失败则降级到 mock，保证 MVP 不崩
-        return (f"[视觉调用失败，已降级 mock] {e}\n\n"
-                "（请检查 .env 中的 LLM_API_KEY / 模型是否支持视觉）")
+    except Exception:  # noqa: BLE001
+        return ("（视觉识别暂时不可用，已降级）请稍后再试，或检查 .env 中的 "
+                "LLM_API_KEY / 模型是否支持视觉。")
 
 
 def _mock_vision(prompt):

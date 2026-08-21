@@ -20,8 +20,9 @@ class MemoryAgent(BaseAgent):
         "技巧/约定/流程类记到 memory 存储。回答简洁、口语化。"
     )
 
-    # 「存储」触发词
-    _STORE_KW = ["记住", "记下", "记一下", "别忘了", "记着", "记笔记", "记个笔记"]
+    # 「存储」触发词（覆盖口语化说法：记住/记下/记入/存入/写入/放进/加入）
+    _STORE_KW = ["记住", "记下", "记一下", "别忘了", "记着", "记笔记", "记个笔记",
+                 "记入", "存入", "写入", "放进", "放入", "加入"]
     # 「回忆」触发词（问句）
     _RECALL_KW = ["你记得", "还记得", "回忆", "记得我什么", "记得什么", "记得吗", "记得不"]
 
@@ -82,7 +83,30 @@ def is_memory_intent(msg: str) -> bool:
 
 
 def _extract_fact(msg: str) -> str:
-    for p in ["记住我", "记得我", "记一下", "记个笔记", "记笔记", "记下", "记住", "记着", "别忘了"]:
-        if p in msg:
-            return msg.split(p, 1)[1].strip(" ：:，。？?吗")
-    return msg.strip(" ：:，。？?吗")
+    s = (msg or "").strip()
+    # 去掉开头引导语（帮我把 / 把 / 请帮我…）
+    for lead in ("帮我把", "帮我", "请帮我", "请记", "把"):
+        if s.startswith(lead):
+            s = s[len(lead):]
+            break
+    # 去掉结尾指令壳（记入用户画像 / 存入我的userid / 画像…）
+    for tail in ("记入用户画像", "记入用户id", "记入我的userid", "存入用户画像",
+                 "存入我的userid", "存入用户id", "记入画像", "存入画像",
+                 "用户画像", "我的userid", "用户id", "画像"):
+        if s.endswith(tail):
+            s = s[: -len(tail)]
+            break
+    # 处理「把 X 放进/存入/记入 Y」结构：事实在动词之前
+    for verb in ("放进", "放入", "存入", "记入", "写入"):
+        if verb in s:
+            s = s.split(verb, 1)[0]
+            break
+    # 再尝试已知 store 前缀（记住我… / 记下… / 记入…）
+    for p in ("记住我", "记得我", "记一下", "记个笔记", "记笔记", "记下", "记住",
+              "记着", "别忘了", "记入", "存入", "写入", "放进", "放入", "加入"):
+        if p in s:
+            s = s.split(p, 1)[1]
+            break
+    # 去掉无意义的连接词
+    s = s.rstrip("也一下")
+    return s.strip(" ：:，.。?？!！吗、")

@@ -18,6 +18,12 @@ def route(user_msg: str) -> str:
     agents = get_all_agents()
     if config.CONFIG.mock_mode:
         return _keyword_route(user_msg)
+    # 关键词快速路由先行（2026-08-20 优化）：
+    # 明确的「记录/分析/记忆/搜索/伤病」等意图直接命中，省掉一次 LLM 路由调用（快 + 省 token）；
+    # 只有关键词拿不准（返回 general）时才用 LLM 路由兜底，保证模糊请求的路由质量。
+    kw = _keyword_route(user_msg)
+    if kw != "general":
+        return kw
     try:
         catalog = "\n".join(f"- {a['name']}：{a['description']}" for a in agent_catalog())
         name = llm.chat(
@@ -28,7 +34,7 @@ def route(user_msg: str) -> str:
             return name
     except Exception:
         pass
-    return _keyword_route(user_msg)
+    return kw
 
 
 def detect_skills(user_msg: str):

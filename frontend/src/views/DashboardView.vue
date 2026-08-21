@@ -115,11 +115,11 @@ onMounted(async () => {
   margin-bottom: 20px;
 }
 .dash-title {
-  font-size: 24px;
+  font-size: 26px;
   font-weight: 700;
 }
 .dash-sub {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--faint);
   margin-top: 4px;
 }
@@ -133,26 +133,26 @@ onMounted(async () => {
   background: color-mix(in srgb, var(--card) 85%, transparent);
   border: 1px solid var(--border);
   border-radius: 14px;
-  padding: 16px 18px;
+  padding: 18px 20px;
 }
 .stat-label {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--muted);
 }
 .stat-value {
-  font-size: 30px;
+  font-size: 34px;
   font-weight: 700;
   margin-top: 6px;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
 .stat-unit {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--faint);
   margin-top: 2px;
 }
 .board-title {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--accent);
   margin-bottom: 10px;
@@ -168,8 +168,8 @@ onMounted(async () => {
   display: flex;
   gap: 14px;
   align-items: baseline;
-  font-size: 14px;
-  padding: 8px 0;
+  font-size: 15px;
+  padding: 10px 0;
   border-bottom: 1px dashed var(--border-soft);
 }
 .row:last-child {
@@ -179,7 +179,7 @@ onMounted(async () => {
   color: var(--accent);
   font-weight: 600;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: 14px;
 }
 .main {
   color: var(--text-soft);
@@ -187,13 +187,13 @@ onMounted(async () => {
 .extra {
   margin-left: auto;
   color: var(--faint);
-  font-size: 13px;
+  font-size: 14px;
   white-space: nowrap;
 }
 .no-data {
-  font-size: 14px;
+  font-size: 15px;
   color: var(--faint);
-  padding: 14px 0;
+  padding: 16px 0;
   text-align: center;
 }
 </style>

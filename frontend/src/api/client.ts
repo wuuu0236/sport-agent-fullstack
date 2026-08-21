@@ -6,6 +6,8 @@ export interface ChatResp {
   agent?: string
   output?: string
   reply?: string
+  mode?: string
+  events?: OrchestrateEvent[]
 }
 
 export interface OrchestrateEvent {
@@ -25,6 +27,7 @@ export interface OrchestrateEvent {
   final?: boolean
   status?: string
   message?: string
+  error?: string
   steps?: string[]
   count?: number
   records?: any[]
@@ -63,6 +66,84 @@ export async function getSessions(limit = 12): Promise<{ sessions: any[] }> {
 export async function getMemory(): Promise<{ user: string[]; memory: string[]; snapshot: string }> {
   const resp = await fetch(`/agent/memory`)
   if (!resp.ok) throw new Error('memory fetch failed')
+  return await resp.json()
+}
+
+// 训练计划：当前计划 + 备选方案 + 待确认计划
+export interface PlanData {
+  id: string
+  name: string
+  goal: string
+  phase?: string
+  cycleMeta?: string
+  countdown?: string
+  nutrition?: string
+  notes?: string | string[]
+  content?: string
+  days?: PlanDay[]
+  createdAt?: string
+  updatedAt?: string
+}
+export interface PlanDay {
+  date: string
+  weekday: string
+  items: { name: string; detail: string }[]
+  focus: string
+  rest: boolean
+}
+export interface PlansResp {
+  activeId: string | null
+  pending: PlanData | null
+  plans: PlanData[]
+}
+export async function getPlans(): Promise<PlansResp> {
+  const resp = await fetch(`/agent/plan`)
+  if (!resp.ok) throw new Error('plan fetch failed')
+  return await resp.json()
+}
+export async function applyPlan(action: 'replace' | 'add'): Promise<{ ok: boolean; msg?: string; active?: PlanData }> {
+  const resp = await fetch(`/agent/plan/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  })
+  if (!resp.ok) throw new Error('plan apply failed')
+  return await resp.json()
+}
+export async function generatePlan(goal: string): Promise<{ ok: boolean; pending: PlanData }> {
+  const resp = await fetch(`/agent/plan/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ goal }),
+  })
+  if (!resp.ok) throw new Error('plan generate failed')
+  return await resp.json()
+}
+export async function switchPlan(id: string): Promise<{ ok: boolean; msg?: string; active?: PlanData }> {
+  const resp = await fetch(`/agent/plan/switch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  })
+  if (!resp.ok) throw new Error('plan switch failed')
+  return await resp.json()
+}
+export async function deletePlan(id: string): Promise<{ ok: boolean; msg?: string }> {
+  const resp = await fetch(`/agent/plan/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  })
+  if (!resp.ok) throw new Error('plan delete failed')
+  return await resp.json()
+}
+export async function discardPending(): Promise<{ ok: boolean; msg?: string }> {
+  const resp = await fetch(`/agent/plan/discard`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  if (!resp.ok) throw new Error('plan discard failed')
   return await resp.json()
 }
 

@@ -14,17 +14,12 @@
       <div class="chat">
         <HeaderBar :conn="conn" :connText="connText" />
 
-        <!-- 多 Agent 协作链路看板：Supervisor 主 Agent 派发的子 Agent 实时状态（动态） -->
-        <AgentBoard
-          :showBoard="showBoard"
-          :chainOrder="chainOrder"
-          :chain="chain"
+        <MessageList
+          :messages="messages"
           :pendingCommit="pendingCommit"
           @commit="doCommit"
           @dismissCommit="pendingCommit = null"
         />
-
-        <MessageList :messages="messages" />
 
         <!-- 图片拖拽/点击/粘贴上传 -->
         <Dropzone :uploading="uploading" @pick="pickFile" @dropFile="handleImage" />
@@ -41,18 +36,19 @@
       </div>
     </main>
 
-    <!-- 右侧用户画像：USER 长期记忆（关于你的身份/偏好/训练基线） -->
-    <UserProfileSidebar :entries="userMemory" />
+    <!-- 右侧：仅用户画像。多 Agent 协作链路已内联到对话流的「思考过程」卡片 -->
+    <div class="right-rail">
+      <UserProfileSidebar :entries="userMemory" />
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import HeaderBar from '../components/HeaderBar.vue'
 import MessageList from '../components/MessageList.vue'
 import ChatInput from '../components/ChatInput.vue'
 import Dropzone from '../components/Dropzone.vue'
-import AgentBoard from '../components/AgentBoard.vue'
 import SessionSidebar from '../components/SessionSidebar.vue'
 import UserProfileSidebar from '../components/UserProfileSidebar.vue'
 import type { Msg } from '../types'
@@ -70,6 +66,7 @@ import {
   migrateLegacyHistory,
 } from '../utils/session'
 import { sendChat, checkHealth, importImage, orchestrate, commitRecords, getMemory } from '../api/client'
+import type { OrchestrateEvent } from '../api/client'
 
 // ---- 会话管理 ----
 const sessions = ref<SessionMeta[]>(listSessions())
@@ -159,12 +156,25 @@ async function loadUserMemory() {
   }
 }
 
-// ---- 多 Agent 编排看板状态（动态：Supervisor 派发哪个子 Agent 就显示哪个）----
-const chainOrder = ref<string[]>([])
-const chain = reactive<Record<string, { status: string; output: string }>>({})
-const showBoard = ref(false)
+// ---- 多 Agent 编排：内联「思考过程」消息（不再单独面板）----
 const orchestrating = ref(false)
 const pendingCommit = ref<{ count: number; records?: any[] } | null>(null)
+
+// 子 Agent 中文标签（协作链路内联展示用）
+const nodeLabel: Record<string, string> = {
+  recorder: 'recorder · 记录',
+  analyst: 'analyst · 分析',
+  searcher: 'searcher · 搜索',
+  clinician: 'clinician · 康复排查',
+  expert: 'expert · 运动科学',
+  planner: 'planner · 计划编排',
+  reviewer: 'reviewer · 内容评审',
+  memory: 'memory · 记忆',
+  scheduler: 'scheduler · 日程',
+  writer: 'writer · 润色',
+  general: 'general · 通用',
+  supervisor: 'supervisor · 主Agent',
+}
 
 async function doCommit() {
   const recs = pendingCommit.value?.records
@@ -199,11 +209,25 @@ async function send(text: string) {
   busy.value = true
   try {
     const data = await sendChat(text)
-    messages.value.push({
-      role: 'assistant',
-      text: data.output ?? data.reply ?? '(无回复)',
-      agent: data.agent,
-    })
+    // 后端自动升级到多 Agent 编排：把 events 渲染成对话流里的一条「思考过程」消息，
+    // 按顺序逐步 apply，模拟实时协作过程；最终结果作为独立 assistant 消息。
+    if (data.events && data.events.length) {
+      orchestrating.value = true
+      pendingCommit.value = null
+      const t = pushThinking()
+      const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+      for (let i = 0; i < data.events.length; i++) {
+        applyEvent(data.events[i], t)
+        if (i < data.events.length - 1) await sleep(90)
+      }
+      orchestrating.value = false
+    } else {
+      messages.value.push({
+        role: 'assistant',
+        text: data.output ?? data.reply ?? '(无回复)',
+        agent: data.agent,
+      })
+    }
   } catch (e) {
     messages.value.push({ role: 'assistant', text: '请求失败：' + String(e) })
   } finally {
@@ -212,44 +236,71 @@ async function send(text: string) {
   }
 }
 
-// 触发多 Agent 主从编排：Supervisor 拆解 → 派发子 Agent → 回收 → 综合，SSE 实时刷新看板
+// 新建一条内联「思考过程」消息，返回响应式引用供 applyEvent 更新步骤
+function pushThinking(): Msg {
+  const t: Msg = { role: 'thinking', thinking: { steps: [], status: 'running' } }
+  messages.value.push(t)
+  return t
+}
+
+// 把编排事件应用到内联「思考过程」消息（Supervisor 派发哪个子 Agent 就显示哪个）。
+// send() 普通聊天自动升级编排、triggerOrchestrate() 手动按钮，两者共用此渲染逻辑。
+function applyEvent(e: OrchestrateEvent, t: Msg) {
+  const steps = t.thinking!.steps
+  if (e.type === 'plan' && e.steps) {
+    for (const n of e.steps) {
+      if (!steps.find((s) => s.name === n)) {
+        steps.push({ name: n, label: nodeLabel[n] || n, status: 'idle' })
+      }
+    }
+  } else if (e.type === 'agent_start' && e.agent) {
+    let s = steps.find((x) => x.name === e.agent)
+    if (!s) {
+      s = { name: e.agent, label: nodeLabel[e.agent] || e.agent, status: 'running' }
+      steps.push(s)
+    } else {
+      s.status = 'running'
+    }
+  } else if (e.type === 'agent_done' && e.agent) {
+    const s = steps.find((x) => x.name === e.agent)
+    if (s) {
+      s.status = 'done'
+      s.output = e.output || ''
+    } else {
+      steps.push({ name: e.agent, label: nodeLabel[e.agent] || e.agent, status: 'done', output: e.output || '' })
+    }
+  } else if (e.type === 'agent_error' && e.agent) {
+    // 单节点失败：标红，但不中断整条链；Supervisor 会如实注明缺失继续
+    const out = e.error || e.output || '节点失败'
+    const s = steps.find((x) => x.name === e.agent)
+    if (s) {
+      s.status = 'failed'
+      s.output = out
+    } else {
+      steps.push({ name: e.agent, label: nodeLabel[e.agent] || e.agent, status: 'failed', output: out })
+    }
+  } else if (e.type === 'complete') {
+    t.thinking!.status = 'done'
+    if (e.output) {
+      messages.value.push({ role: 'assistant', text: e.output, agent: 'supervisor' })
+    }
+  } else if (e.type === 'pending_commit' && e.count) {
+    pendingCommit.value = { count: e.count, records: e.records }
+  } else if (e.type === 'error') {
+    t.thinking!.status = 'done'
+  }
+}
+
+// 触发多 Agent 主从编排：Supervisor 拆解 → 派发子 Agent → 回收 → 综合。
+// 同样内联成「思考过程」消息，与自动升级体验一致。
 function triggerOrchestrate(inputText: string) {
   if (orchestrating.value) return
   const msg = inputText || '请帮我生成本周的个人训练周报'
   messages.value.push({ role: 'user', text: '【多 Agent】' + msg })
-  showBoard.value = true
   orchestrating.value = true
   pendingCommit.value = null
-  chainOrder.value = []
-  for (const k of Object.keys(chain)) delete chain[k]
-  orchestrate(msg, (e) => {
-    if (e.type === 'plan' && e.steps) {
-      // Supervisor 已拆解出子任务序列，预置看板槽位
-      chainOrder.value = e.steps
-      for (const n of e.steps) chain[n] = { status: 'idle', output: '' }
-    } else if (e.type === 'agent_start' && e.agent) {
-      if (!chain[e.agent]) {
-        chain[e.agent] = { status: 'running', output: '' }
-        if (!chainOrder.value.includes(e.agent)) chainOrder.value.push(e.agent)
-      } else {
-        chain[e.agent] = { status: 'running', output: '' }
-      }
-    } else if (e.type === 'agent_done' && e.agent) {
-      chain[e.agent] = { status: 'done', output: e.output || '' }
-    } else if (e.type === 'agent_error' && e.agent) {
-      // 单节点失败：看板标红，但不中断整条链；Supervisor 会如实注明缺失继续
-      chain[e.agent] = { status: 'failed', output: e.error || e.output || '节点失败' }
-    } else if (e.type === 'complete') {
-      if (e.output) {
-        messages.value.push({ role: 'assistant', text: e.output, agent: 'supervisor' })
-      }
-      orchestrating.value = false
-    } else if (e.type === 'pending_commit' && e.count) {
-      pendingCommit.value = { count: e.count, records: e.records }
-    } else if (e.type === 'error') {
-      orchestrating.value = false
-    }
-  })
+  const t = pushThinking()
+  orchestrate(msg, (e) => applyEvent(e, t))
 }
 
 function pickFile() {
@@ -311,12 +362,17 @@ onMounted(() => {
 }
 .chat {
   width: 100%;
-  max-width: 860px;
-  padding: 16px 24px;
+  max-width: 1000px;
+  padding: 16px 28px;
   font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
   display: flex;
   flex-direction: column;
   height: 100vh;
   box-sizing: border-box;
+}
+.right-rail {
+  display: flex;
+  flex: none;
+  height: 100vh;
 }
 </style>

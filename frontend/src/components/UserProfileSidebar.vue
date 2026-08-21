@@ -1,8 +1,18 @@
 <template>
-  <aside class="profile">
+  <!-- 折叠状态：窄竖条，点击展开 -->
+  <div v-if="collapsed" class="profile-collapsed" @click="collapsed = false" title="展开用户画像">
+    <span class="fold-icon">👤</span>
+    <span class="fold-label">画像</span>
+  </div>
+
+  <!-- 展开状态：完整侧栏 -->
+  <aside v-else class="profile">
     <div class="profile-head">
-      <div class="profile-title">👤 用户画像</div>
-      <div class="profile-sub">关于你的长期记忆 · 助手记得的</div>
+      <div class="profile-titles">
+        <div class="profile-title">👤 用户画像</div>
+        <div class="profile-sub">关于你的长期记忆 · 助手记得的</div>
+      </div>
+      <button class="fold-btn" title="收起" @click="collapsed = true">▶</button>
     </div>
 
     <div v-if="entries.length" class="entries">
@@ -24,19 +34,65 @@
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
+
+const COLLAPSE_KEY = 'sport-profile-sidebar-collapsed'
+function loadCollapsed(): boolean {
+  try {
+    return localStorage.getItem(COLLAPSE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
 defineProps<{ entries: string[] }>()
+
+const collapsed = ref(loadCollapsed())
+function toggle(c: boolean) {
+  collapsed.value = c
+  try {
+    localStorage.setItem(COLLAPSE_KEY, c ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+}
 </script>
 
 <style scoped>
+.profile-collapsed {
+  width: 40px;
+  flex: none;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding-top: 16px;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--bg-soft) 80%, transparent);
+  backdrop-filter: blur(14px);
+  color: var(--muted);
+  transition: color 0.12s, background 0.12s;
+}
+.profile-collapsed:hover {
+  color: var(--accent);
+  background: var(--card-hover);
+}
+.fold-icon {
+  font-size: 18px;
+}
+.fold-label {
+  font-size: 12px;
+  writing-mode: vertical-rl;
+}
 .profile {
-  width: 240px;
+  width: 260px;
   flex: none;
   height: 100vh;
   display: flex;
   flex-direction: column;
   background: color-mix(in srgb, var(--bg-soft) 80%, transparent);
   backdrop-filter: blur(14px);
-  border-left: 1px solid var(--border);
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
@@ -44,15 +100,38 @@ defineProps<{ entries: string[] }>()
 .profile-head {
   padding: 14px 14px 10px;
   border-bottom: 1px solid var(--border-soft);
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.profile-titles {
+  flex: 1;
+  min-width: 0;
 }
 .profile-title {
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
 }
 .profile-sub {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--faint);
   margin-top: 3px;
+}
+.fold-btn {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.fold-btn:hover {
+  background: var(--card-hover);
+  color: var(--text);
 }
 .entries {
   flex: 1;
@@ -64,8 +143,8 @@ defineProps<{ entries: string[] }>()
 .entry {
   display: flex;
   gap: 7px;
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: 14px;
+  line-height: 1.6;
   color: var(--text-soft);
   background: color-mix(in srgb, var(--card) 70%, transparent);
   border: 1px solid var(--border-soft);
@@ -90,16 +169,16 @@ defineProps<{ entries: string[] }>()
   gap: 8px;
 }
 .empty-icon {
-  font-size: 34px;
+  font-size: 40px;
   opacity: 0.8;
 }
 .empty-title {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--text-soft);
 }
 .empty-hint {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--faint);
   line-height: 1.6;
 }

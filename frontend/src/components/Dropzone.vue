@@ -36,7 +36,7 @@ function onDrop(e: DragEvent) {
   border-radius: 12px;
   padding: 16px;
   text-align: center;
-  font-size: 14px;
+  font-size: 15px;
   color: var(--muted);
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s;
