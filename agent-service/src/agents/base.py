@@ -2,6 +2,23 @@
 from .. import llm, memory, config
 from ..skill_loader import skill_block, tier1_catalogue
 
+# 稳定前缀缓存：技能目录(tier1_catalogue)只依赖 skills 注册表，几乎不变。
+# 拼一次复用，既省每次调用的字符串拼装，又让全局前缀字符串保持稳定（更利于命中缓存）。
+_CATALOGUE_CACHE = None
+
+
+def _get_catalogue() -> str:
+    global _CATALOGUE_CACHE
+    if _CATALOGUE_CACHE is None:
+        _CATALOGUE_CACHE = tier1_catalogue() or ""
+    return _CATALOGUE_CACHE
+
+
+def _invalidate_catalogue():
+    """skills 注册表热变更时调用（当前无热变更，预留接口）。"""
+    global _CATALOGUE_CACHE
+    _CATALOGUE_CACHE = None
+
 
 class BaseAgent:
     name = "base"
@@ -20,7 +37,7 @@ class BaseAgent:
         """
         system = self.system_prompt
         # Tier 1 技能目录常驻：让 LLM 知道有哪些技能可调用（极轻量，约 20~60 字/技能）
-        cat = tier1_catalogue()
+        cat = _get_catalogue()
         if cat:
             system = system + "\n\n" + cat
         ctx = ctx or {}

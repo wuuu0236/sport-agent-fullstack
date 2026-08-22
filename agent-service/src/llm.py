@@ -29,6 +29,17 @@ def _should_retry(exc: Exception) -> bool:
     return False
 
 
+def _log_usage(data: dict):
+    """打印每次真实调用的 token 用量，重点看上下文缓存命中（DeepSeek 默认开启、
+    命中部分约 1/10 计费）。usage 字段名随模型/版本变化，这里整段打印便于核对。"""
+    try:
+        u = (data or {}).get("usage")
+        if u:
+            print(f"[LLM usage] {u}", flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _post_json(url: str, payload: dict, timeout: int = 60) -> dict:
     """带重试的 POST JSON，返回解析后的响应 dict。"""
     last_exc = None
@@ -38,7 +49,9 @@ def _post_json(url: str, payload: dict, timeout: int = 60) -> dict:
         req.add_header("Authorization", f"Bearer {config.CONFIG.LLM_API_KEY}")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                data = json.loads(resp.read().decode("utf-8"))
+                _log_usage(data)
+                return data
         except Exception as e:  # noqa: BLE001
             last_exc = e
             if not _should_retry(e) or attempt >= _MAX_RETRIES:
