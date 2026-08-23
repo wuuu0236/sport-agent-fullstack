@@ -26,7 +26,7 @@ from src.agents.planner_agent import PlannerAgent
 from src.skill_loader import match_skills
 from src.server import image_import, _import_save
 from src.sport_data import SportStore
-from src.orchestrator import SupervisorAgent, _is_injury
+from src.orchestrator import SupervisorAgent
 from src import plan_store
 
 _store = SportStore()
@@ -109,7 +109,7 @@ def chat(req: ChatReq):
         goal = _current_goal_from_message(req.message) or _read_active_goal()
         try:
             task = f"请帮我生成一份{goal}训练计划"
-            plan_text = SupervisorAgent().run(task)
+            plan_text = _coach_answer(task)
             plan = {"name": goal, "goal": goal, "content": plan_text}
             plan_store.set_pending(plan)
             out = (
@@ -270,7 +270,7 @@ def generate_plan(req: dict = None):
     if not goal:
         raise HTTPException(status_code=400, detail="goal is required")
     task = f"请帮我生成一份{goal}训练计划"
-    plan_text = SupervisorAgent().run(task)
+    plan_text = _coach_answer(task)
     plan = {"name": goal, "goal": goal, "content": plan_text}
     plan_store.set_pending(plan)
     return {"ok": True, "pending": plan}
@@ -419,14 +419,24 @@ def _needs_orchestration(msg: str) -> bool:
     if any(k in msg for k in ("记一次", "记录", "保存", "入库", "添加")) and \
        any(k in msg for k in ("跑", "公里", "km", "组", "次", "kg", "训练")):
         return False
-    # 伤病 / 疼痛会诊：固定三 Agent 协作（检索 + 数据诱因 + 分诊），稳定且最能体现协作价值
-    if _is_injury(msg):
-        return True
-    # 多步综合意图：需要「检索 + 分析 + 编排」或「综合成计划 / 周报」
-    _COMPLEX_KW = ("周报", "计划", "周期", "编排", "方案", "安排", "生成一套",
-                   "训练安排", "减脂", "增肌", "训练计划", "周期化", "制定",
-                   "给我安排", "帮我规划", "训练方案", "健身计划", "如何训练")
+    # 健身域已统一归 coach（谭成义唯一直答），不再走多 Agent 编排；
+    # 仅「周报」这类汇报表保留多步编排（检索 + 分析 + 编排）价值。
+    _COMPLEX_KW = ("周报",)
     return any(k in msg for k in _COMPLEX_KW)
+
+
+def _coach_answer(msg: str) -> str:
+    """把消息交给 coach（谭成义）单 Agent 直答，返回输出文本。
+
+    健身域统一出口：跑步/减脂/增肌/练部位/伤痛/计划都先走这里，
+    保证用户始终从蒸馏到的谭成义视角得到回答，而非被多 Agent 拆成通用内容。
+    """
+    agent = get_agent("coach")
+    skills = match_skills(msg)
+    try:
+        return agent.handle(msg, {"skills": skills})
+    except Exception as e:
+        return f"教练生成建议时出错：{e}"
 
 
 def _detect_goal(msg: str):
@@ -485,18 +495,11 @@ def _handle_goal_change(msg: str, goal: str) -> dict:
     prev = _read_active_goal()
     _record_goal(goal)
     try:
-        # 把用户原话一起给 Supervisor，避免只传简短 goal 丢失细节
-        # （如「我要体测，像在1km跑进3.30」只传「体测」会丢掉 1km/3:30）
-        task = (
-            f"请帮我生成一份面向「{goal}」的周期性训练计划。\n"
-            f"用户原话：{msg}\n"
-            "要求：列出每周训练安排、具体动作或跑课表、强度、注意事项；"
-            "不要分析单次训练数据，不要编造检索来源。"
-        )
-        plan_text = SupervisorAgent().run(task)
-        plan = {"name": goal, "goal": goal, "content": plan_text}
-        plan_store.set_pending(plan)
-        out = _append_plan_prompt(plan_text, goal, goal)
+        # 目标变更也视为健身咨询：交给 coach（谭成义）直答，不再多 Agent 编排
+        out = _coach_answer(msg)
+        # 教练给出的方案也写入「计划」模块待确认，保持模块联动
+        plan_store.set_pending({"name": goal, "goal": goal, "content": out})
+        out = _append_plan_prompt(out, goal, goal)
         if prev and prev != goal:
             out = (
                 f"📝 已将原目标「{prev}」保留到历史画像，当前目标更新为「{goal}」。\n\n"
@@ -505,10 +508,10 @@ def _handle_goal_change(msg: str, goal: str) -> dict:
     except Exception as e:
         out = (
             f"📌 已记录你的新训练目标「{goal}」。\n"
-            f"生成对应计划时出错：{e}。你可以说「帮我生成{goal}计划」再试。"
+            f"教练生成建议时出错：{e}。你可以说「帮我生成{goal}计划」再试。"
         )
     memory.append_session("assistant", out)
-    return {"agent": "plan_manager", "output": out, "metadata": {}}
+    return {"agent": "coach", "output": out, "metadata": {}}
 
 
 def _record_goal(goal: str) -> None:

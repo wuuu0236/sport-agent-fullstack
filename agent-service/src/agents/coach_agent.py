@@ -6,6 +6,10 @@ from ..sport_data import SportStore, hr_zone
 
 _STORE = SportStore()
 
+# 部位词：用于把「胸/背/腿…」这类裸部位名识别为「训练建议」而非「力量分析」
+_BODY_PARTS = ("胸", "背", "腿", "肩", "手臂", "胳膊", "二头", "三头",
+               "核心", "腹", "臀", "腰", "前臂", "三角肌", "肱二", "肱三", "背部", "腿部")
+
 
 def _user_max_hr():
     """从 USER.md 基线取最大心率；否则 220-年龄；再否则默认 190。"""
@@ -183,6 +187,11 @@ class CoachAgent(BaseAgent):
                 run.append(ch)
         return "".join(run)
 
+    @staticmethod
+    def _is_body_part(name: str) -> bool:
+        """判断提取到的词是不是身体部位（胸/背/腿…），而非具体动作（卧推/深蹲）。"""
+        return any(bp in name for bp in _BODY_PARTS)
+
     def _analyze_strength(self, msg):
         name = self._exercise_name(msg)
         if not name:
@@ -190,7 +199,10 @@ class CoachAgent(BaseAgent):
                     "——我来算渐进超负荷趋势。")
         t = _STORE.strength_trend(name)
         if t["trend"] == "first":
-            return f"『{name}』只有 {t['samples']} 次记录，先多积累几次再看渐进超负荷趋势。"
+            return (f"『{name}』还没记录过训练数据，先别急着看趋势——没数据看个寂寞。\n"
+                    f"先练一轮，练完用『{name} 4组8次60kg』这种格式告诉我，"
+                    f"下次就能给你算渐进超负荷了。\n"
+                    f"要不要现在直接给你排一份「{name}训练日」？说一声我马上排。")
         arrow = {"up": "↑ 容量在涨（渐进超负荷，进步中）",
                  "down": "↓ 容量下降（可能减载/疲劳，注意恢复）",
                  "flat": "→ 容量持平（维持期）"}[t["trend"]]
@@ -229,11 +241,22 @@ class CoachAgent(BaseAgent):
         if data_term:
             # 提到数据词但没明确要分析、也没问概念 → 默认展示分析（保留原有行为）
             return "analyze_run"
-        if "力量" in msg or "渐进" in msg or "进步" in msg or "组" in msg:
+        # 明确的渐进超负荷分析意图（需有记录才有效）→ 力量分析
+        if any(k in msg for k in ("进步", "趋势", "渐进", "容量", "怎么样",
+                                  "练得如何", "增长", "退步", "数据分析")):
             return "analyze_strength"
-        # 短问题 + 命中动作名才归力量分析（卧推怎么样 → 卧推）；
-        # 长句（如「刚才那个马拉松的问题，我想跑首马」）是聊天/上下文问答，别误判
-        if len(msg) <= 12 and self._exercise_name(msg):
+        # 训练建议类（怎么练 / 今天练 / 给计划 / 动作标准 / 发力 / 增肌减脂）
+        # → 谭成义口吻直接给具体训练，而不是去查「渐进超负荷趋势」
+        if any(k in msg for k in ("怎么练", "如何练", "今天", "计划", "安排",
+                                  "动作", "标准", "发力", "增肌", "减脂",
+                                  "教我", "入门", "新手", "组数", "次数怎么")):
+            return "chat"
+        # 裸部位名（胸/背/腿…）无分析意图 → 视为「怎么练这个部位」→ 训练建议
+        name = self._exercise_name(msg)
+        if name and self._is_body_part(name):
+            return "chat"
+        # 简短且含具体动作名、无上述意图 → 仍按力量分析兜底（历史行为）
+        if len(msg) <= 12 and name:
             return "analyze_strength"
         return "chat"
 
@@ -263,6 +286,19 @@ class CoachAgent(BaseAgent):
         recent = _STORE.analyze_run(runs[-1], max_hr) if runs else None
         data = (f"用户最大心率基线：{max_hr}。\n"
                 f"最近跑步分析：{recent}\n" if recent else "尚无跑步记录。")
+        # 提取用户想练的部位/动作，引导给出具体训练日而非泛泛而谈
+        focus = self._exercise_name(msg)
+        if not focus:
+            m = re.search(r"练([一-龥]{1,3})", msg)
+            if m and self._is_body_part(m.group(1)):
+                focus = m.group(1)
+        focus_hint = ""
+        if focus:
+            focus_hint = (f"\n用户这轮想练「{focus}」。请直接给一份具体的「{focus}训练日」："
+                          f"动作清单（动作名 + 组数×次数 + 建议强度/RPE + 简要要点）、"
+                          f"热身流程、收尾拉伸；若用户尚无该部位记录，结尾提醒练完用"
+                          f"『动作 组数×次数×重量kg』格式记一下，方便下次看渐进超负荷。")
         return (f"{data}\n用户消息：{msg}\n"
                 f"请以谭成义（铁馆老炮）口吻回应：动作质量优先、结论先行、用比喻少术语；"
-                f"涉及用户真实数据（心率/配速/负荷）时务必结合数据说话，不硬套话术。")
+                f"涉及用户真实数据（心率/配速/负荷）时务必结合数据说话，不硬套话术。"
+                f"{focus_hint}")
