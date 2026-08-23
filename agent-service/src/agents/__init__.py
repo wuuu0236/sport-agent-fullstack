@@ -42,7 +42,7 @@ _AGENTS = {
 _AGENTS["memorist"] = _AGENTS["memory"]
 _AGENTS["research"] = _AGENTS["searcher"]
 _AGENTS["posture"] = _AGENTS["clinician"]
-_AGENTS["coach"] = _AGENTS["recorder"]      # 语义近似：记录主责
+_AGENTS["coach"] = CoachAgent()             # 真正的教练入口（谭成义人格，含记录/分析/问答）
 
 # 供 Supervisor 拆解时枚举的描述目录（Claude Code 风格：description 就是「何时派它」）
 # reviewer 是主循环内部的评审节点，不展示给拆解 LLM（避免被当成普通子任务派发）。
