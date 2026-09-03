@@ -14,9 +14,13 @@ from ..sport_data import SportStore
 
 _STORE = SportStore()
 
-# 力量格式：动作 组数×次数×重量kg（如「深蹲 4组8次80kg」）
+# 力量格式：动作 组数×次数×重量kg。
+# 分隔符同时兼容空格与 × x X * ——「卧推 3组×10次×60kg」（真实口语写法）与
+# 「深蹲 4组8次80kg」都要能解析。
+# 2026-08-30 修：旧正则只认空格，导致带 × 号的写法解析失败（用户实际就是这么写的）。
+# 重量段改为可选：没写重量时记 None，由上层追问，不猜测、不丢弃整条记录。
 _STRENGTH_RE = re.compile(
-    r"([一-龥A-Za-z]+)\s*(\d+)\s*组\s*(\d+)\s*次\s*(\d+)\s*kg")
+    r"([一-龥A-Za-z]+)\s*(\d+)\s*组[\s×xX*]*(\d+)\s*次(?:[\s×xX*]*(\d+)\s*kg)?")
 # 跑步距离：5km / 5公里 / 5千米
 _DIST_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:km|公里|千米)", re.I)
 _PACE_RE = re.compile(r"配速[：:\s]*(\d+)\s*分")
@@ -88,8 +92,9 @@ def _parse_run(msg: str):
 def _parse_strength(msg: str):
     exs = []
     for m in _STRENGTH_RE.finditer(msg):
+        w = m.group(4)  # 重量段可选：没写就是 None，交给上层追问，不猜测
         exs.append({"name": m.group(1), "sets": int(m.group(2)),
-                    "reps": int(m.group(3)), "weight_kg": int(m.group(4))})
+                    "reps": int(m.group(3)), "weight_kg": int(w) if w else None})
     if not exs:
         return None
     return {"date": datetime.date.today().isoformat(), "exercises": exs,

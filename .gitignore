@@ -30,6 +30,11 @@ build.log
 .DS_Store
 Thumbs.db
 
+# ---------- 本地调试产物（冒烟输出 / 对照脚本运行结果）----------
+_*.txt
+_*.json
+_*.log
+
 # ---------- IDE ----------
 .idea/
 .vscode/

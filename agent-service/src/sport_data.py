@@ -132,8 +132,9 @@ class SportStore:
         try:
             with open(fn, "w", encoding="utf-8") as f:
                 json.dump(rec, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            # 训练记录写失败绝不能静默：用户练了但库里没有，属于无声数据丢失
+            print(f"[SportStore] 训练记录落盘失败 {fn.name}: {e}", flush=True)
 
     # ---------- 读取 ----------
     def all(self):
@@ -141,7 +142,8 @@ class SportStore:
         try:
             for fn in sorted(self.dir.glob("*.json")):
                 try:
-                    out.append(json.load(open(fn, encoding="utf-8")))
+                    with open(fn, encoding="utf-8") as f:
+                        out.append(json.load(f))
                 except Exception:
                     pass
         except Exception:

@@ -236,7 +236,9 @@ def _rule_parse_ocr(text: str) -> dict:
     if m:
         d["rpe"] = int(m.group(1) or m.group(2))
     for line in text.splitlines():
-        m = _re.search(r"([一-龥A-Za-z]+)\s*(\d+)\s*[组×xX]\s*(\d+)\s*[次×xX]\s*(\d+(?:\.\d+)?)\s*kg", line)
+        # 分隔符允许「组/次」后跟可选 ×（华为截图实测两种写法都有：
+        # 「4组8次80kg」与「4组×8次×80kg」），否则后一种整行匹配不上
+        m = _re.search(r"([一-龥A-Za-z]+)\s*(\d+)\s*[组×xX]\s*[×xX]?\s*(\d+)\s*[次×xX]\s*[×xX]?\s*(\d+(?:\.\d+)?)\s*kg", line)
         if m:
             d["exercises"].append({"name": m.group(1), "sets": int(m.group(2)),
                                    "reps": int(m.group(3)), "weight_kg": float(m.group(4))})
@@ -567,8 +569,8 @@ drop.addEventListener('drop',e=>{
 window.addEventListener('paste',e=>{
   const items=e.clipboardData&&e.clipboardData.items;
   if(!items)return;
-  for(const it of items){
-    if(it.kind==='file'&&/^image\//.test(it.type)){
+    for(const it of items){
+    if(it.kind==='file'&&/^image\\//.test(it.type)){
       const f=it.getAsFile();
       if(f){handleImageFile(f);e.preventDefault();}
       break;
@@ -634,14 +636,31 @@ refresh();
 
 class _Handler(BaseHTTPRequestHandler):
     def end_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # 旧版曾用 Access-Control-Allow-Origin: *：任何网页都能跨域读 /state
+        # （含健康数据）。改为只回显本机来源，其余不给 CORS 头（浏览器拒绝读）。
+        origin = self.headers.get("Origin", "")
+        if origin.startswith(("http://localhost", "http://127.0.0.1")):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Agent-Token")
         super().end_headers()
 
     def do_OPTIONS(self):
         self.send_response(204)
         self.end_headers()
+
+    def _authorized(self) -> bool:
+        """与 app.py 同一 token 约定：AGENT_AUTH_TOKEN 非空即强制校验。
+        这个旧服务平时不启动，但只要 run_server 被跑起来就不能裸奔。"""
+        token = config.CONFIG.AGENT_AUTH_TOKEN
+        return not token or self.headers.get("X-Agent-Token") == token
+
+    def _unauthorized(self):
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b'{"ok": false, "error": "unauthorized"}')
 
     _cli = CLIAdapter()
     _wechat = WeChatAdapter(account_id=config.CONFIG.WECHAT_ACCOUNT_ID)
@@ -653,6 +672,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
     def do_GET(self):
+        if not self._authorized():
+            self._unauthorized()
+            return
         # /health 返回 JSON 健康检查；/state 返回仪表盘数据；其余返回网页界面
         if self.path.startswith("/health"):
             self._respond({"status": "ok", "msg": "sport-agent-mvp running", "mock": config.CONFIG.mock_mode})
@@ -667,6 +689,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(html.encode("utf-8"))
 
     def do_POST(self):
+        if not self._authorized():
+            self._unauthorized()
+            return
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b"{}"
         try:

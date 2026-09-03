@@ -15,10 +15,19 @@
 """
 import re
 import json
+import threading
 from . import config
 
 # 与 Hermes 同款的条目分隔符（§ 段落符，支持多行条目）
 _DELIM = "\n§\n"
+
+# 文件读改写互斥锁：FastAPI 的同步端点跑在线程池里，USER.md / MEMORY.md /
+# session.json 都是「读整个文件 → 改 → 写回」的模式，没有锁时两个并发请求
+# 会互相覆盖（丢消息）甚至写坏 JSON。app.py 的 _record_goal 直写 USER.md
+# 也复用这把锁。读操作（load / list_store）不加锁：Markdown 单文件写入
+# 在 CPython 里近似原子，读到旧值只是暂时不一致，锁只保护读改写区间。
+_FILE_LOCK = threading.Lock()
+file_lock = _FILE_LOCK  # 公开别名：跨模块（app.py）复用同一把锁
 
 # 字符上限（mock 演示放宽；生产可收紧到 Hermes 的 2200/1375）
 USER_LIMIT = 2000
@@ -99,18 +108,19 @@ class MemoryStore:
             return False, "内容为空"
         if target not in ("user", "memory"):
             return False, "target 必须是 'user' 或 'memory'"
-        entries = self._entries(target)
-        if content in entries:
-            return True, "已存在，跳过重复"
-        total = len(_DELIM.join(entries + [content]))
-        if total > self._limit(target):
-            return False, (
-                f"超出 {target} 存储上限（{self._limit(target)} 字符），"
-                f"请先合并/删除旧条目再记"
-            )
-        entries.append(content)
-        self._write(target)
-        self.load()  # 刷新快照（下一会话生效）
+        with _FILE_LOCK:
+            entries = self._entries(target)
+            if content in entries:
+                return True, "已存在，跳过重复"
+            total = len(_DELIM.join(entries + [content]))
+            if total > self._limit(target):
+                return False, (
+                    f"超出 {target} 存储上限（{self._limit(target)} 字符），"
+                    f"请先合并/删除旧条目再记"
+                )
+            entries.append(content)
+            self._write(target)
+            self.load()  # 刷新快照（下一会话生效）
         return True, "ok"
 
     def forget(self, target: str, old_text: str):
@@ -118,13 +128,14 @@ class MemoryStore:
         old_text = (old_text or "").strip()
         if not old_text:
             return False, "old_text 为空"
-        entries = self._entries(target)
-        matches = [i for i, e in enumerate(entries) if old_text in e]
-        if not matches:
-            return False, "未找到匹配条目"
-        del entries[matches[0]]
-        self._write(target)
-        self.load()
+        with _FILE_LOCK:
+            entries = self._entries(target)
+            matches = [i for i, e in enumerate(entries) if old_text in e]
+            if not matches:
+                return False, "未找到匹配条目"
+            del entries[matches[0]]
+            self._write(target)
+            self.load()
         return True, "ok"
 
     def list_store(self, target: str = None):
@@ -276,11 +287,14 @@ def load_session() -> dict:
 
 def append_session(role: str, content: str) -> None:
     import json
-    d = load_session()
-    d.setdefault("messages", []).append({"role": role, "content": content})
-    d["messages"] = d["messages"][-50:]  # 仅保留最近 50 条
-    _session_path().parent.mkdir(parents=True, exist_ok=True)
-    _session_path().write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 读整个 session.json → append → 写回，是典型 read-modify-write；
+    # 不持锁时并发 /chat 会互相覆盖丢消息，这里用文件锁串行化。
+    with _FILE_LOCK:
+        d = load_session()
+        d.setdefault("messages", []).append({"role": role, "content": content})
+        d["messages"] = d["messages"][-50:]  # 仅保留最近 50 条
+        _session_path().parent.mkdir(parents=True, exist_ok=True)
+        _session_path().write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def session_turns(max_n: int = 20, skip_last: int = 1) -> list:

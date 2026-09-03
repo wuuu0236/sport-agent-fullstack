@@ -133,6 +133,29 @@ start-all.bat
 > 请先按上方「快速开始 · 步骤 2」执行 `mvn clean package -DskipTests`。
 > 注意：脚本直接 `java -jar`，若 8080 已被占用会启动失败，先释放端口再跑。
 
+## 安全（2026-09 加固）
+
+- **服务鉴权**：`agent-service/.env` 里 `AGENT_AUTH_TOKEN` 非空时，除 `/health` 外所有接口要求
+  请求头 `X-Agent-Token` 匹配（FastAPI 中间件）。防三类威胁：浏览器恶意网页打本机接口、
+  DNS rebinding、容器化后裸奔局域网。留空 = 关闭（纯本机开发默认）。
+- **启用方法（三处同步）**：`agent-service/.env`、`backend/src/main/resources/application.properties`
+  的 `agent.service.token`、`frontend/vite.config.ts` 的 `X-Agent-Token`。Spring 侧改完需
+  `mvn clean package -DskipTests` 重新打包。
+- **CORS**：旧版 `src/server.py`（休眠的 stdlib HTTP 入口）从 `*` 收紧为仅回显本机 Origin，并走同一 token 校验。
+- **异常脱敏**：Agent 内部异常只记服务端日志，客户端拿通用文案；旧版 `.env` 上传限制等回归见更新日志。
+
+## 测试（61 个用例，`pytest tests/` 全绿）
+
+```bash
+cd agent-service
+python -m pip install -r requirements-dev.txt   # pytest + httpx
+python -m pytest tests/ -q
+```
+
+覆盖五层：文件导入解析（GPX/CSV/OCR 规则兜底）、意图管线（目标检测回归）、
+分析层（心率区间/负荷/力量趋势）、plan_store 流转与并发、HTTP 层（鉴权中间件 + 异常脱敏）。
+LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-ocr.txt`。
+
 ## 当前已验证（端到端全通 ✅，2026-08-19）
 
 完整链路已实测跑通，三服务均 LISTENING（8001 / 8080 / 5173）：
@@ -167,6 +190,12 @@ start-all.bat
   跨会话常驻并注入各 Agent 的 system prompt（真实 LLM 模式下自动解析落地；mock 模式仅提示、不写盘）。
 
 ## 更新日志（迭代脉络）
+
+### 2026-09-02 安全与质量加固（面试导向的一轮硬化）
+- **鉴权**：FastAPI 增加 `X-Agent-Token` 中间件（`AGENT_AUTH_TOKEN` 控制），Spring 拦截器透传、Vite 代理带头；旧版 server.py CORS `*` 收紧 + 同 token 校验。
+- **并发**：`memory.py` / `plan_store.py` 文件读改写加锁（RLock 处理 apply_pending→active_plan 重入），16 线程并发 append 回归测试零丢失。
+- **Bug**：修复意图管线顺序（记忆意图先于目标检测，「我想起来了你记得吗」不再被误判成目标变更）；修复 `_rule_parse_ocr` 力量行正则不认「组×次×kg」；Spring multipart 调到 10MB（默认 1MB 挡截图）；`Map.of` null NPE；SSE 编排异常静默截断补 error 事件。
+- **质量**：新增 61 个 pytest 用例（解析/意图/分析/存储/HTTP 五层）；Java URL 与 token 移入 application.properties；新增 requirements-dev.txt / requirements-ocr.txt；面试讲法见根目录《面试要点.md》。
 
 ### 2026-08-20 工作台模式 + 用户画像侧栏
 

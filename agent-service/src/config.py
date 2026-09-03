@@ -45,6 +45,12 @@ class _Config:
     # 未配置时自动降级为免费维基百科兜底，再不行就诚实告知未联网。
     TAVILY_API_KEY = _env.get("TAVILY_API_KEY", "")
 
+    # 服务鉴权：非空时所有端点（除 /health）要求请求头 X-Agent-Token 匹配。
+    # 留空 = 关闭鉴权（纯本机开发模式）。调用方（Spring 网关 / Vite 代理）
+    # 需在各自配置里带同一个 token。防的是「浏览器里任意网页打 localhost 接口」
+    # 与「DNS rebinding」，以及容器化后裸奔在局域网。
+    AGENT_AUTH_TOKEN = _env.get("AGENT_AUTH_TOKEN", "")
+
     @property
     def mock_mode(self) -> bool:
         return not bool(self.LLM_API_KEY)

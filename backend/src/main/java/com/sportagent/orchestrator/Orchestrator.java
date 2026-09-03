@@ -26,26 +26,37 @@ import java.util.function.Consumer;
  */
 public class Orchestrator {
 
-    private static final String SUPERVISE_URL = "http://localhost:8001/supervise";
-
     private static final int CONNECT_TIMEOUT_MS = 5_000;
     // 覆盖整个编排时长（多 Agent 串行 + 各子 Agent 一次 LLM 调用）
     private static final int READ_TIMEOUT_MS = 300_000;
 
     private final ObjectMapper mapper = new ObjectMapper();
+    private final String superviseUrl;
+    private final String token;
 
-    public Orchestrator() {
+    public Orchestrator(String baseUrl, String token) {
+        String base = baseUrl == null || baseUrl.isBlank()
+                ? "http://127.0.0.1:8001" : baseUrl.trim();
+        if (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        this.superviseUrl = base + "/supervise";
+        this.token = token == null ? "" : token.trim();
     }
 
     public void run(String userMessage, Consumer<Map<String, Object>> emit) {
         HttpURLConnection conn = null;
         try {
-            URL url = new URL(SUPERVISE_URL + "?stream=1");
+            URL url = new URL(superviseUrl + "?stream=1");
             conn = (HttpURLConnection) url.openConnection();
             conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
             conn.setReadTimeout(READ_TIMEOUT_MS);
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
+            // 与 Python 侧 AGENT_AUTH_TOKEN 对齐；token 为空则不带（鉴权关闭）
+            if (!token.isEmpty()) {
+                conn.setRequestProperty("X-Agent-Token", token);
+            }
             conn.setDoOutput(true);
 
             String body = "{\"message\":" + mapper.writeValueAsString(userMessage) + "}";

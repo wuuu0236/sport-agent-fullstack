@@ -63,8 +63,15 @@ def _post_json(url: str, payload: dict, timeout: int = 60) -> dict:
     raise RuntimeError("LLM 接口请求失败（网络异常）")
 
 
-def chat(messages, model=None, temperature=0.7, max_tokens=1024):
-    """messages: [{"role":"system"|"user"|"assistant", "content": "..."}]"""
+def chat(messages, model=None, temperature=0.7, max_tokens=2048, thinking="disabled"):
+    """messages: [{"role":"system"|"user"|"assistant", "content": "..."}]
+
+    thinking：DeepSeek V4 思考模式开关（"disabled" / "enabled"），默认关闭。
+    默认关闭的原因（2026-08-30 实测）：V4 默认 enabled + high 强度，链式推理会把
+    max_tokens 额度全部耗在 reasoning 上，导致最终回答为空（表现为"模型本次未生成内容"）。
+    教练直答/任务拆解这类场景不需要深度链式推理，关闭后响应更快、更省、且必定有输出。
+    确需深度推理的调用点可显式传 thinking="enabled"（记得同步调大 max_tokens）。
+    """
     if config.CONFIG.mock_mode:
         return _mock_chat(messages)
     url = config.CONFIG.LLM_BASE_URL.rstrip("/") + "/chat/completions"
@@ -73,6 +80,7 @@ def chat(messages, model=None, temperature=0.7, max_tokens=1024):
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "thinking": {"type": thinking},
     }
     try:
         data = _post_json(url, payload)

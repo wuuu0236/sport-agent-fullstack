@@ -10,19 +10,22 @@
   POST /route            {message}          -> {agent}                      仅路由，供编排层先问再调
   GET  /sessions         {limit?}           -> {sessions:[{type,date,summary}]}  最近训练记录（供前端展示）
 """
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import base64
 import datetime
 import json
+import re
 import threading
+import traceback
 from queue import Queue
 
 from src import config, memory
 from src.supervisor import route
 from src.agents import get_agent
-from src.agents.planner_agent import PlannerAgent
+from src.agents.memory_agent import is_memory_intent
+from src.agents.coach_agent import _user_max_hr
 from src.skill_loader import match_skills
 from src.server import image_import, _import_save
 from src.sport_data import SportStore
@@ -33,6 +36,26 @@ _store = SportStore()
 
 
 app = FastAPI(title="sport-agent-service", version="0.1.0")
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    """简单 token 鉴权：AGENT_AUTH_TOKEN 非空时，除 /health 外一律要求
+    请求头 X-Agent-Token 匹配。防三类现实威胁：浏览器恶意网页对本机接口的
+    跨站调用、DNS rebinding、容器化后（--host 0.0.0.0）裸奔在局域网。
+    留空 = 关闭（纯本机开发模式）。/health 只暴露 mock 状态与模型名，放行。"""
+    token = config.CONFIG.AGENT_AUTH_TOKEN
+    if token and request.url.path != "/health" and request.method != "OPTIONS":
+        if request.headers.get("X-Agent-Token") != token:
+            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
+def _agent_error(name: str, e: Exception) -> HTTPException:
+    """内部异常不外泄：完整堆栈只进服务端日志，客户端拿通用文案。"""
+    traceback.print_exc()
+    return HTTPException(status_code=500,
+                         detail=f"agent[{name}] 执行失败，请查看 agent-service 日志")
 
 
 class ChatReq(BaseModel):
@@ -85,24 +108,24 @@ def chat(req: ChatReq):
         memory.append_session("assistant", out)
         return {"agent": "plan_manager", "output": out, "metadata": {}}
 
+    # 记忆意图（记住/记下/记入/存入/放进…）必须先于目标变更检测：
+    # 「我想起来了，你记得吗」这类回忆句会被 _detect_goal 的「我想」正则截走，
+    # 误当成目标变更并生成计划（真实回归 bug）。元动作（记忆）优先级更高。
+    if is_memory_intent(req.message):
+        agent = get_agent("memory")
+        try:
+            out = agent.handle(req.message)
+        except Exception as e:
+            raise _agent_error("memory", e)
+        memory.append_session("assistant", out)
+        return {"agent": "memory", "output": out, "metadata": {}}
+
     # 训练目标变更意图（如「我要体测」「我想增肌」「目标换成…」）。
     # 这类消息既是画像更新，也隐含要新计划，因此直接生成计划并询问应用方式，
     # 不能交给记忆 Agent 只写 USER.md，否则计划模块不会联动刷新。
     goal = _detect_goal(req.message)
     if goal:
         return _handle_goal_change(req.message, goal)
-
-    # 记忆意图（记住/记下/记入/存入/放进…）交给记忆 Agent 真正落盘，
-    # 否则会被 supervisor.route 误判为闲聊、只回文字不写 USER.md。
-    from src.agents.memory_agent import is_memory_intent
-    if is_memory_intent(req.message):
-        agent = get_agent("memory")
-        try:
-            out = agent.handle(req.message)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"agent[memory] failed: {e}")
-        memory.append_session("assistant", out)
-        return {"agent": "memory", "output": out, "metadata": {}}
 
     # 生成/更新计划意图：用户明确要生成新计划且没有待确认计划时，直接生成并询问如何应用
     if _is_plan_generate_intent(req.message):
@@ -123,8 +146,6 @@ def chat(req: ChatReq):
         return {"agent": "plan_manager", "output": out, "metadata": {}}
 
 
-    # 目标变更意图：用户表达新训练目标时记录到长期记忆，并在回复末尾询问是否更新计划
-    goal = _detect_goal(req.message)
     # 自动升级：复杂任务（多步综合 / 伤病会诊）自动走 SupervisorAgent 主从编排，
     # 普通问答 / 记录仍走单 Agent 路由——对齐业界「主 Agent 运行中自动判断派活」。
     if _needs_orchestration(req.message):
@@ -132,13 +153,6 @@ def chat(req: ChatReq):
         def _emit(e):
             events.append(e)
         final = SupervisorAgent().run(req.message, emit=_emit)
-        if goal:
-            _record_goal(goal)
-            try:
-                plan_store.set_pending({"name": goal, "goal": goal, "content": final})
-                final = _append_plan_prompt(final, goal, goal)
-            except Exception:
-                final = _append_goal_prompt(final, goal)
         memory.append_session("assistant", final)
         return {"agent": "supervisor", "output": final, "events": events,
                 "mode": "orchestrated", "metadata": {}}
@@ -151,10 +165,7 @@ def chat(req: ChatReq):
     try:
         out = agent.handle(req.message, ctx)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"agent[{name}] failed: {e}")
-    if goal:
-        _record_goal(goal)
-        out = _append_goal_prompt(out, goal)
+        raise _agent_error(name, e)
     memory.append_session("assistant", out)
     return {
         "agent": name,
@@ -173,7 +184,7 @@ def agent_call(name: str, req: AgentReq):
     try:
         out = agent.handle(req.input, ctx)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"agent[{name}] failed: {e}")
+        raise _agent_error(name, e)
     return {
         "agent": name,
         "output": out,
@@ -195,7 +206,6 @@ def list_sessions(limit: int = 12):
       strength -> exercises（动作明细）
     summary 保留为人类可读文本，兼容旧前端。
     """
-    from src.agents.coach_agent import _user_max_hr
     recs = _store.all()
     recs.sort(key=lambda r: r.get("date") or "", reverse=True)
     out = []
@@ -398,6 +408,10 @@ def _supervise_stream(task: str):
     def worker():
         try:
             SupervisorAgent().run(task, emit=emit)
+        except Exception as e:  # noqa: BLE001
+            # 编排异常必须以 error 事件收尾，否则前端收到的流会静默截断，
+            # 看起来像「正常结束但什么都没发生」。
+            emit({"type": "error", "message": f"编排失败：{e}"})
         finally:
             q.put(None)
 
@@ -445,7 +459,10 @@ def _detect_goal(msg: str):
     覆盖：我要减脂 / 我想增肌 / 我的目标改成… / 改练三分化 / 换成… / 调整成…
     纯计划请求（不含目标陈述）返回 None，避免与编排关键词重复触发。
     """
-    import re
+    # 记忆意图（记住/记得/别忘了…）不是目标变更：「我想起来了，你记得吗」
+    # 会被下面的「我想」正则截走、误生成计划。元动作在意图管线里永远优先。
+    if is_memory_intent(msg):
+        return None
     m = re.search(
         r"(?:我要|我想|我打算|我的目标(?:是|改为|改成)?|目标是|改练|换成|调整成|调整为|新目标(?:是)?|目前目标(?:是)?)\s*[:：]?\s*(.+)",
         msg,
@@ -540,11 +557,11 @@ def _record_goal(goal: str) -> None:
     new_entry = f"当前训练目标：{goal}"
     if new_entry not in new_entries:
         new_entries.append(new_entry)
-    # 写回 USER.md 并刷新内存快照
-    from src import config
-    user_path = config.CONFIG.USER_FILE
-    user_path.parent.mkdir(parents=True, exist_ok=True)
-    user_path.write_text("\n§\n".join(new_entries), encoding="utf-8")
+    # 写回 USER.md 并刷新内存快照（与 memory 模块共用文件锁，防并发读改写互踩）
+    with memory.file_lock:
+        user_path = config.CONFIG.USER_FILE
+        user_path.parent.mkdir(parents=True, exist_ok=True)
+        user_path.write_text("\n§\n".join(new_entries), encoding="utf-8")
     memory.load()
 
 
@@ -598,7 +615,6 @@ def _is_plan_generate_intent(msg: str) -> bool:
 
 def _current_goal_from_message(msg: str) -> str:
     """从「生成计划」类消息里提取目标，如「生成减脂三分化计划」。"""
-    import re
     # 先尝试完整目标句
     m = re.search(
         r"(?:生成|更新|重新编排|给我|我要|来一份)\s*(.+?)\s*(?:计划|方案|安排)?$",
