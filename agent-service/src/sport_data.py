@@ -213,3 +213,150 @@ class SportStore:
         return {"name": exercise_name, "samples": len(rows), "trend": trend,
                 "delta_pct": round(delta * 100, 1),
                 "latest": rows[-1][2], "prev": rows[-2][2]}
+
+    # ---------- 周聚合（多 Agent 会诊的「硬数据」地基）----------
+    @staticmethod
+    def _parse_date(rec: dict):
+        """解析记录的 date 字段；无法解析返回 None（日期绝不猜、绝不兜底成今天）。"""
+        raw = str(rec.get("date") or "").strip()
+        if not raw:
+            return None
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.datetime.strptime(raw[:19], fmt).date()
+            except ValueError:
+                continue
+        return None
+
+    def weekly_summary(self, weeks: int = 3, max_hr: int = 190) -> list:
+        """按 ISO 周聚合跑量/时长/负荷，返回最近 weeks 个「有记录」的周（由旧到新）。
+
+        只统计真实存在的记录：某周没跑就不出现在结果里，不补零、不插值、不编造。
+        load 仅在记录带心率时才有值（沿用 analyze_run 的 has_hr 约定），否则为 None。
+        """
+        buckets = {}
+        for r in self.runs():
+            d = self._parse_date(r)
+            if d is None:
+                continue
+            iso = d.isocalendar()
+            key = (iso[0], iso[1])
+            b = buckets.setdefault(key, {"km": 0.0, "min": 0.0, "load": 0.0,
+                                         "count": 0, "has_hr": False,
+                                         "start": None, "end": None})
+            b["km"] += float(r.get("distance_km") or 0)
+            b["min"] += float(r.get("duration_min") or 0)
+            a = self.analyze_run(r, max_hr)
+            if a.get("load") is not None:
+                b["load"] += float(a["load"])
+                b["has_hr"] = True
+            b["count"] += 1
+            s = d.isoformat()
+            b["start"] = s if b["start"] is None or s < b["start"] else b["start"]
+            b["end"] = s if b["end"] is None or s > b["end"] else b["end"]
+        if not buckets:
+            return []
+        out = []
+        for key in sorted(buckets.keys())[-weeks:]:
+            b = buckets[key]
+            out.append({
+                "iso_year": key[0], "iso_week": key[1],
+                "start": b["start"], "end": b["end"],
+                "runs": b["count"],
+                "km": round(b["km"], 2),
+                "min": round(b["min"], 1),
+                "load": round(b["load"], 1) if b["has_hr"] else None,
+                "has_hr": b["has_hr"],
+            })
+        return out
+
+    def daily_load(self, days: int = 28, max_hr: int = 190) -> dict:
+        """最近 days 天里，每天的训练负荷（TRIMP）；只含真正有带心率记录的日期。
+
+        不带心率的记录不参与（load 为 None），绝不拿距离或时长硬凑负荷。
+        """
+        today = datetime.date.today()
+        start = today - datetime.timedelta(days=days - 1)
+        out = {}
+        for r in self.runs():
+            d = self._parse_date(r)
+            if d is None or d < start or d > today:
+                continue
+            a = self.analyze_run(r, max_hr)
+            if a.get("load") is None:
+                continue
+            out[d.isoformat()] = out.get(d.isoformat(), 0.0) + float(a["load"])
+        return dict(sorted(out.items()))
+
+    def acwr(self, max_hr: int = 190) -> dict:
+        """急性:慢性负荷比（ACWR）——运动医学通用的伤病风险指标。
+
+        急性 = 最近 7 天负荷；慢性 = 最近 28 天负荷 / 4（周均）。
+        阈值是代码里的硬规则，不交给模型判断：
+          >1.5 高危（过载）｜1.3~1.5 偏高｜0.8~1.3 安全区｜<0.8 训练不足或减量期。
+        数据不足以支撑计算时如实返回 status，绝不估算一个比值出来。
+        """
+        daily = self.daily_load(days=28, max_hr=max_hr)
+        if not daily:
+            return {"status": "empty", "risk": "unknown",
+                    "message": "最近 28 天没有带心率的训练记录，算不出负荷"}
+
+        def _sum(days_back: int) -> float:
+            s = (datetime.date.today() - datetime.timedelta(days=days_back - 1)).isoformat()
+            return sum(v for k, v in daily.items() if k >= s)
+
+        today_s = datetime.date.today().isoformat()
+        acute = _sum(7)
+        chronic = _sum(28) / 4.0
+        base = {"acute_load": round(acute, 1), "chronic_load": round(chronic, 1),
+                "days_with_data": len(daily), "latest_date": max(daily.keys()),
+                "stale_days": (datetime.date.today()
+                               - datetime.date.fromisoformat(max(daily.keys()))).days}
+        # 数据陈旧优先判定：最近一次训练距今过久，任何负荷趋势结论都不可信，
+        # 绝不拿「很久没练」冒充「训练不足」——这两者对会诊的含义完全不同。
+        if base["stale_days"] > 14:
+            base.update({"status": "stale", "acwr": None, "risk": "unknown",
+                         "message": (f"最近一次记录是 {base['stale_days']} 天前，"
+                                     f"数据已过期，无法判断当前负荷趋势")})
+            return base
+        if chronic <= 0:
+            base.update({"status": "insufficient", "acwr": None, "risk": "unknown",
+                         "message": "近 28 天训练太少，慢性负荷为 0，比值不可用"})
+            return base
+        ratio = acute / chronic
+        risk = ("high" if ratio > 1.5 else
+                "elevated" if ratio >= 1.3 else
+                "low" if ratio >= 0.8 else "detraining")
+        base.update({"status": "ok", "acwr": round(ratio, 2), "risk": risk,
+                     "today": today_s})
+        return base
+
+    def week_over_week(self, max_hr: int = 190) -> dict:
+        """最近两个「有记录」的 ISO 周对比（跑量/时长/负荷 + 增幅%）。
+
+        数据不足或心率缺失时如实标注 status，绝不估算——这是伤痛会诊里
+        「单周增幅 >10% 触发安全驳回」硬规则的唯一数据来源，只能由代码算。
+        """
+
+        def _pct(a, b):
+            if a is None or b is None or not b:
+                return None
+            return round((a - b) / b * 100, 1)
+
+        weeks = self.weekly_summary(weeks=2, max_hr=max_hr)
+        if not weeks:
+            return {"status": "empty", "message": "还没有任何跑步记录"}
+        if len(weeks) < 2:
+            return {"status": "insufficient", "weeks": weeks,
+                    "message": "只有一个周有记录，无法做周环比"}
+        prev, cur = weeks[-2], weeks[-1]
+        gap = (cur["iso_year"] - prev["iso_year"]) * 52 + (cur["iso_week"] - prev["iso_week"])
+        return {
+            "status": "ok",
+            "prev": prev, "cur": cur,
+            "gap_weeks": gap,
+            "contiguous": gap == 1,
+            "km_delta_pct": _pct(cur["km"], prev["km"]),
+            "min_delta_pct": _pct(cur["min"], prev["min"]),
+            "load_delta_pct": _pct(cur["load"], prev["load"]),
+        }
