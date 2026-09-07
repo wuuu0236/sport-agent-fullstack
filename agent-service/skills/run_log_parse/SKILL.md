@@ -2,7 +2,7 @@
 name: run_log_parse
 description: 从自然语言中解析跑步记录并结构化入库
 summary: 提取距离/时长/配速/心率/RPE，能算则补，算不出不编造
-triggers: [跑了, 公里, 配速, 晨跑, 夜跑, 慢跑, 记一次跑步, 今天跑, 跑步记录]
+triggers: [跑了, 公里, 晨跑, 夜跑, 慢跑, 记一次跑步, 今天跑, 跑步记录]
 agent: recorder
 ---
 解析用户的跑步记录，遵循 SOP：
