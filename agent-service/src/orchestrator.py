@@ -21,6 +21,7 @@ import re
 
 from . import config, llm, memory
 from .agents import get_agent, agent_catalog
+from .skill_loader import match_skills
 from .sport_data import SportStore
 
 # 步骤引用：input 里的 @s1 在执行时替换为 s1 的真实产出（截断防超长）
@@ -108,6 +109,7 @@ class SupervisorAgent:
 
     def run(self, task: str, emit=None) -> str:
         emit = emit or (lambda e: None)
+        self.used_skills = {}  # 本次编排各步骤实际注入的技能（供上层输出 metadata）
         emit({"type": "start"})
 
         plan = self._plan(task)
@@ -120,7 +122,7 @@ class SupervisorAgent:
             emit({"type": "agent_start", "agent": name, "step": i,
                   "total": len(plan)})
             try:
-                out = self._dispatch(name, step["input"], results)
+                out = self._dispatch(name, step["input"], results, task)
                 results[step["id"]] = {"agent": name, "output": out}
                 emit({"type": "agent_done", "agent": name, "step": i,
                       "total": len(plan),
@@ -177,7 +179,26 @@ class SupervisorAgent:
         return plan if plan else _fallback_plan(task)
 
     # ---------- 派发（代码的执行）：子 Agent 隔离执行，只回收产出 ----------
-    def _dispatch(self, name: str, inp: str, results: dict) -> str:
+    def _skills_for_step(self, agent_name: str, task: str) -> list:
+        """编排路径的技能注入（2026-09-07）：原先一律传 skills:[]，子 Agent 全裸跑。
+
+        与单 Agent 直答路径的两点不同：
+        1. 用**原始用户任务**匹配，不用 step input——后者已被 @s1/@s2 替换进
+           前序产出（可能含"心率""公里"等词），噪声大、容易误命中；
+        2. 多一道门控：SKILL.md 声明了主理 agent 的，只有本步派发的 agent
+           与之相同才注入（未声明的技能对所有步骤开放）。
+           目的：避免把"解析入库"的 SOP 灌给 planner 造成跨职责串味——
+           与 f7559d6 修的「技能 vs 人格冲突」同类，这里在入口就拦掉。
+        """
+        hits = match_skills(task or "")
+        picked = []
+        for s in hits:
+            owner = (s.get("agent") or "").strip()
+            if not owner or owner == agent_name:
+                picked.append(s)
+        return picked
+
+    def _dispatch(self, name: str, inp: str, results: dict, task: str = "") -> str:
         # 依赖引用解析：@s1 → 替换为 s1 的真实产出（隔离回收的产物，截断防超长）
         inp = _REF_RE.sub(
             lambda m: ((results.get(m.group(1)) or {}).get("output")
@@ -188,9 +209,14 @@ class SupervisorAgent:
         # 且关掉短期历史(use_history=False)让前缀稳定、更易命中 DeepSeek 缓存，
         # 记忆走按需召回(recall_mode="recall")只取最相关前 5 条，避免全量记忆重复计费。
         # 主 Agent 仍走全量记忆 + 吃缓存折扣（见 supervisor/server 主路径）。
+        # 技能：按「用户任务 + 本步 agent 是否该技能的主理人」注入（见 _skills_for_step）。
+        step_skills = self._skills_for_step(agent.name, task)
+        for s in step_skills:
+            self.used_skills.setdefault(s["name"], 0)
+            self.used_skills[s["name"]] += 1
         out = agent.handle(
             inp,
-            {"skills": [], "use_history": False, "recall_mode": "recall"},
+            {"skills": step_skills, "use_history": False, "recall_mode": "recall"},
         )
         if not (out or "").strip():
             raise ValueError(f"{name} 返回空输出")

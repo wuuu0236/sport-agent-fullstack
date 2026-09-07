@@ -169,10 +169,15 @@ def chat(req: ChatReq):
         events: list = []
         def _emit(e):
             events.append(e)
-        final = SupervisorAgent().run(req.message, emit=_emit)
+        sv = SupervisorAgent()
+        final = sv.run(req.message, emit=_emit)
         memory.append_session("assistant", final)
+        # 编排路径此前 metadata 恒为 {}，看不到子 Agent 到底吃到了哪些技能；
+        # 技能注入修好后一并把命中情况回传，便于自查（与单 Agent 路径口径一致）。
         return {"agent": "supervisor", "output": final, "events": events,
-                "mode": "orchestrated", "metadata": {}}
+                "mode": "orchestrated",
+                "metadata": {"used_skills": list(sv.used_skills.keys()),
+                             "skill_hits": sv.used_skills}}
     name = route(req.message)
     agent = get_agent(name)
     skills = match_skills(req.message)
