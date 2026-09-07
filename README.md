@@ -4,14 +4,14 @@
 升级为产品级混合栈：**Spring Boot 做网关层，Python(FastAPI) 做 Agent 能力微服务（含主-从多 Agent 编排），Vue 做前端**。
 
 > 设计核心：**分级响应**——健身域问题统一由谭成义人格教练单 Agent 直答（多数请求单次调用完成），
-> 复杂任务（周报等）才升级多 Agent 编排：主 Agent（Supervisor）把任务拆解后显式派发给
+> 多源汇合任务（周报 / 阶段总结 / 数据驱动计划）才升级多 Agent 编排：主 Agent（Supervisor）把任务拆解后显式派发给
 > 各子 Agent 隔离执行，只回收摘要。**「拆解是模型的判断，派发/验收是代码的门控」**，
 > 杜绝模型答跑偏还把结果硬塞给用户。
 
 ## 项目亮点（为什么值得讲）
 
 1. **Claude Code 式主-从多 Agent 协作（分级触发）**——健身域问题统一由谭成义人格教练单 Agent 直答；
-   复杂任务才升级编排：主 Agent 用 LLM 把任务拆成结构化子任务（强 JSON schema，≤6 步、子 Agent 白名单校验），
+   多源汇合任务才升级编排（周报 / 阶段总结 / 数据驱动计划三类特征，`_needs_orchestration`）：主 Agent 用 LLM 把任务拆成结构化子任务（强 JSON schema，≤4 步、子 Agent 白名单校验），
    逐节点**代码门控派发**，只回收产出摘要（截断防超长），最后由主 Agent 亲自综合收口。
    执行类子 Agent（记录解析 / 数据计算 / 康复知识库）以确定性代码为主，不依赖 LLM 自觉。
    协作全程通过 **SSE 实时推送**到前端看板：拆解了哪几步、谁在跑、谁失败、谁产出，全部**肉眼可见**。
@@ -37,7 +37,7 @@
            → 逐节点: agent_start → _dispatch(替换@s1→调子Agent→空/哨兵判失败) → agent_done|agent_error
            → _synthesize(单步直接用；最后成功步是 planner 用其产出；否则主 Agent 亲自 LLM 综合)
            → complete(output, final) → 若有暂存 → pending_commit(count, records)
-  ↓ 子 Agent 独立执行 —— 上下文剥离（无技能注入 / 无对话历史 / 记忆按需召回 Top5；
+  ↓ 子 Agent 独立执行 —— 上下文隔离（技能按主理 Agent 门控注入 `match_skills_for`：未声明 owner 全开放 / 同名才注入 / coach 例外吸收 clinician、expert；无对话历史 / 记忆按需召回 Top5；
      planner 例外：强制全量注入用户画像，防伤病限制被语义召回漏掉），只交产出字符串
   ↓ 数据层 —— recorder 解析 → 暂存队列 _STAGED → 前端「确认入库」→ /commit → 落库
 ```
@@ -51,7 +51,7 @@
 - 另有 `reviewer`(评审 Agent，PASS/ISSUES 协议) 供编排收口前复核；
   **`coach`(谭成义人格教练) 是独立入口而非别名**——健身域问题统一由它单 Agent 直答。
 - 保留旧别名：`research`→searcher、`posture`→clinician、`memorist`→memory。
-- 编排触发：仅周报等复杂任务升级编排（`_needs_orchestration`），日常请求不进主循环。
+- 编排触发：三类多源汇合特征升级编排（`_needs_orchestration`：周报 / 阶段总结+时间范围 / 数据驱动计划三要素齐），记录类与健身域问答不进主循环。
 
 ## 技术栈（混合栈）
 
@@ -163,7 +163,7 @@ start-all.bat
 - **CORS**：旧版 `src/server.py`（休眠的 stdlib HTTP 入口）从 `*` 收紧为仅回显本机 Origin，并走同一 token 校验。
 - **异常脱敏**：Agent 内部异常只记服务端日志，客户端拿通用文案；旧版 `.env` 上传限制等回归见更新日志。
 
-## 测试（61 个用例，`pytest tests/` 全绿）
+## 测试（74 个用例，`pytest tests/` 全绿）
 
 ```bash
 cd agent-service
@@ -209,6 +209,13 @@ LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-
   跨会话常驻并注入各 Agent 的 system prompt（真实 LLM 模式下自动解析落地；mock 模式仅提示、不写盘）。
 
 ## 更新日志（迭代脉络）
+
+### 2026-09-07 晚 技能链路修复（蒸馏接线 / 编排注入 / 触发词去重 / 主理门控）
+- **「存技能 / patch 技能」接线到线上入口**（`cda660d`）：元动作拦截原先只留在旧入口 server.py，全栈化后 app.py 未接，主路径下技能蒸馏等于死功能；
+- **编排路径子 Agent 按步注入技能**（`bd02742`）：`_dispatch` 原先传 `skills:[]`，编排子 Agent 全裸跑；改为用原始任务匹配 + 主理 Agent 门控，编排 metadata 新增 `used_skills` / `skill_hits` 可观测；
+- **触发词跨技能去重**（`b9ef3b3`）：「配速」同时挂在 run_log_parse 与 coach_hr_zones，多命中无仲裁互相串味；移除解析侧重复触发词；
+- **主理 Agent 门控推广到单 Agent 路径**（`82d1b50`）：判定收敛为 `match_skills_for`，编排与单 Agent 共用；**coach 例外吸收 clinician / expert 技能**，防伤痛回答丢就医红线（回归测试 `test_coach_absorbs_clinician_skill` 锁死）；
+- 测试 61 → **74**（新增 8 条技能回归）。
 
 ### 2026-09-07 伤痛提示词冲突修复 + 运维加固 + 仓库清理
 - **修复提示词自相矛盾**：`coach._build_prompt` 曾把 focus 提取的词**无条件**拼进
