@@ -42,3 +42,27 @@ class TestNeedsOrchestration:
 
     def test_weekly_report_orchestrates(self):
         assert _needs_orchestration("帮我生成训练周报") is True
+
+    def test_summary_with_time_range_orchestrates(self):
+        # 阶段总结类：总结/回顾 + 时间范围 → 多源汇合（读周聚合数据 + 综合成文）→ 编排
+        assert _needs_orchestration("帮我总结一下这周的训练") is True
+        assert _needs_orchestration("回顾最近的训练情况") is True
+        assert _needs_orchestration("给我一份本月训练报告") is True
+
+    def test_summary_without_range_stays_single(self):
+        # 无时间范围的「总结」是单点问题，coach 直答即可，不编排
+        assert _needs_orchestration("总结一下卧推的发力要点") is False
+
+    def test_data_driven_plan_orchestrates(self):
+        # 数据驱动计划：分析/依据 + 数据来源 + 计划产出，三要素齐 → 编排
+        assert _needs_orchestration("根据我最近的训练数据帮我安排下周计划") is True
+        assert _needs_orchestration("分析我的训练情况，出一份方案") is True
+
+    def test_plain_plan_stays_single(self):
+        # 单源计划请求（无数据依据）：coach 直答，不编排
+        assert _needs_orchestration("给我安排一个练胸计划") is False
+        assert _needs_orchestration("新手增肌计划怎么定") is False
+
+    def test_talking_about_report_stays_single(self):
+        # 「谈论周报」≠「要生成周报」：问答类不编排
+        assert _needs_orchestration("周报一般包含什么内容") is False

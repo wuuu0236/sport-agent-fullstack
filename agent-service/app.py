@@ -433,10 +433,35 @@ def _needs_orchestration(msg: str) -> bool:
     if any(k in msg for k in ("记一次", "记录", "保存", "入库", "添加")) and \
        any(k in msg for k in ("跑", "公里", "km", "组", "次", "kg", "训练")):
         return False
-    # 健身域已统一归 coach（谭成义唯一直答），不再走多 Agent 编排；
-    # 仅「周报」这类汇报表保留多步编排（检索 + 分析 + 编排）价值。
-    _COMPLEX_KW = ("周报",)
-    return any(k in msg for k in _COMPLEX_KW)
+    # 健身域已统一归 coach（谭成义唯一直答）；编排只留给「多源汇合」用例：
+    # 需要同时用到外部资料 / 历史数据计算 / 综合成文的，才值得多步编排。
+    # ① 周报类：汇报表（检索 + 分析 + 综合）。
+    #    但「谈论周报」≠「要生成周报」：概念询问类（格式/包含什么/怎么写）不编排。
+    if "周报" in msg:
+        if any(k in msg for k in ("什么", "格式", "怎么写", "包含", "模板", "例子", "示例")):
+            return False
+        return True
+
+    # ② 阶段性总结/回顾类：总结类动词 + 时间范围词同时出现。
+    #    「总结一下卧推要点」是单点问题（无时间范围），不编排；
+    #    「总结这周的训练」需要读周聚合数据再综合，编排。
+    _SUMMARY_KW = ("总结", "汇总", "回顾", "复盘", "报告")
+    _RANGE_KW = ("这周", "本周", "上周", "最近", "近期", "本月", "这个月",
+                 "一个月", "月度", "阶段")
+    if any(k in msg for k in _SUMMARY_KW) and any(k in msg for k in _RANGE_KW):
+        return True
+
+    # ③ 数据驱动计划类：分析/依据 + 数据来源 + 计划产出，三要素齐才编排。
+    #    与单源计划请求区分：「给我安排练胸计划」没有数据依据，coach 直答即可；
+    #    「根据我的训练数据安排计划」要先读数据再综合，走编排。
+    _DATA_KW = ("分析", "根据", "结合", "基于", "参考")
+    _SRC_KW = ("数据", "情况", "记录", "表现", "进步")
+    _PLAN_KW = ("计划", "方案", "安排", "课表")
+    if any(k in msg for k in _DATA_KW) and any(k in msg for k in _SRC_KW) \
+            and any(k in msg for k in _PLAN_KW):
+        return True
+
+    return False
 
 
 def _coach_answer(msg: str) -> str:
