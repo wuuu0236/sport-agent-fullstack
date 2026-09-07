@@ -24,13 +24,6 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
-        <!-- 后续编排阶段再加：
-        <dependency>
-            <groupId>org.elasticsearch</groupId>
-            <artifactId>langgraph4j-spring-boot-starter</artifactId>
-            <version>...</version>
-        </dependency>
-        -->
     </dependencies>
 
     <build>

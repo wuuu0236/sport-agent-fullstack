@@ -3,15 +3,18 @@
 个人体育训练助理的**全栈多智能体**版本。在原有 Python 零依赖 MVP（`sport-agent-mvp`）基础上，
 升级为产品级混合栈：**Spring Boot 做网关层，Python(FastAPI) 做 Agent 能力微服务（含主-从多 Agent 编排），Vue 做前端**。
 
-> 设计核心：多 Agent 协作机制**对齐 Claude Code 的主-从分发**——一个主 Agent（Supervisor）
-> 持有全量上下文并亲自收口，把用户任务拆解后显式派发给各子 Agent 隔离执行，只回收摘要。
-> **「拆解是模型的判断，派发/验收是代码的门控」**，杜绝模型答跑偏还把结果硬塞给用户。
+> 设计核心：**分级响应**——健身域问题统一由谭成义人格教练单 Agent 直答（多数请求单次调用完成），
+> 复杂任务（周报等）才升级多 Agent 编排：主 Agent（Supervisor）把任务拆解后显式派发给
+> 各子 Agent 隔离执行，只回收摘要。**「拆解是模型的判断，派发/验收是代码的门控」**，
+> 杜绝模型答跑偏还把结果硬塞给用户。
 
 ## 项目亮点（为什么值得讲）
 
-1. **Claude Code 式主-从多 Agent 协作**——主 Agent 用 LLM 把任务拆成结构化子任务（强 JSON schema），
-   逐节点**代码门控派发**给专业子 Agent 隔离执行，只回收产出摘要（截断防超长），最后由主 Agent 亲自综合收口。
-   整个协作过程通过 **SSE 实时推送**到前端看板：拆解了哪几步、谁在跑、谁失败、谁产出，全部**肉眼可见**。
+1. **Claude Code 式主-从多 Agent 协作（分级触发）**——健身域问题统一由谭成义人格教练单 Agent 直答；
+   复杂任务才升级编排：主 Agent 用 LLM 把任务拆成结构化子任务（强 JSON schema，≤6 步、子 Agent 白名单校验），
+   逐节点**代码门控派发**，只回收产出摘要（截断防超长），最后由主 Agent 亲自综合收口。
+   执行类子 Agent（记录解析 / 数据计算 / 康复知识库）以确定性代码为主，不依赖 LLM 自觉。
+   协作全程通过 **SSE 实时推送**到前端看板：拆解了哪几步、谁在跑、谁失败、谁产出，全部**肉眼可见**。
 2. **子 Agent 独立工作空间**——写库子 Agent（recorder）解析结果先进**暂存区**，主循环结束发 `pending_commit`
    事件，前端确认后才 `/commit` 落库。图片导入同样先暂存（顺带修复「导入即入库」的 P0-3 回归）。
 3. **失败门控**——子 Agent 空返回/空串兜底文案（哨兵）→ 判该节点失败（`agent_error`）、跳过继续，
@@ -34,14 +37,21 @@
            → 逐节点: agent_start → _dispatch(替换@s1→调子Agent→空/哨兵判失败) → agent_done|agent_error
            → _synthesize(单步直接用；最后成功步是 planner 用其产出；否则主 Agent 亲自 LLM 综合)
            → complete(output, final) → 若有暂存 → pending_commit(count, records)
-  ↓ 子 Agent 独立执行 —— 各自带 system prompt + 记忆快照，隔离上下文，只交产出字符串
+  ↓ 子 Agent 独立执行 —— 上下文剥离（无技能注入 / 无对话历史 / 记忆按需召回 Top5；
+     planner 例外：强制全量注入用户画像，防伤病限制被语义召回漏掉），只交产出字符串
   ↓ 数据层 —— recorder 解析 → 暂存队列 _STAGED → 前端「确认入库」→ /commit → 落库
 ```
 
-**子 Agent 名录**（`agent-service/src/agents/`）：`recorder`(记录/暂存)、`analyst`(数据分析)、
-`searcher`(联网搜索)、`clinician`(安全把关)、`expert`(知识问答)、`planner`(周报/计划编排)、
-`memory`(长期记忆)、`scheduler`(计划调度)、`writer`(文案写作)、`general`(兜底)。
-保留旧别名：`research`→searcher、`posture`→clinician、`coach`→recorder、`memorist`→memory。
+**子 Agent 名录**（`agent-service/src/agents/`），按实现方式分两类：
+- **执行型（确定性代码，不依赖 LLM 自觉）**：`recorder`(正则解析训练描述→暂存)、
+  `analyst`(心率区间/TRIMP/渐进趋势计算)、`clinician`(疼痛排查/康复动作知识库 + 就医红线)；
+- **生成型（LLM + 受控注入）**：`searcher`(联网搜索 + 诚实降级)、`expert`(知识问答 + 用户基线注入)、
+  `planner`(周报/计划综合，强制全量注入用户画像)、`memory`(长期记忆)、`scheduler`(日程提醒)、
+  `writer`(文案写作)、`general`(兜底)；
+- 另有 `reviewer`(评审 Agent，PASS/ISSUES 协议) 供编排收口前复核；
+  **`coach`(谭成义人格教练) 是独立入口而非别名**——健身域问题统一由它单 Agent 直答。
+- 保留旧别名：`research`→searcher、`posture`→clinician、`memorist`→memory。
+- 编排触发：仅周报等复杂任务升级编排（`_needs_orchestration`），日常请求不进主循环。
 
 ## 技术栈（混合栈）
 
@@ -51,6 +61,7 @@
 | 网关 | Spring Boot 3（薄转发：/api/chat、/api/import-image、/api/orchestrate、/api/commit） |
 | Agent 能力层 | Python + FastAPI 微服务：SupervisorAgent 主循环 + 10 个专业子 Agent |
 | 记忆 | 双存储 USER.md / MEMORY.md（冻结快照注入）+ Skill 三级渐进加载 + session 短期记忆 |
+| 数据引擎 | SportStore 确定性计算：周聚合 / 周环比（缺口如实标注）/ 日负荷 / ACWR 急慢性负荷比（伤病风险） |
 | LLM | DeepSeek `deepseek-v4-flash`（OpenAI 兼容接口，无 key 自动 mock 降级） |
 
 ## 目录结构
@@ -64,25 +75,33 @@ sport-agent-fullstack/
 │       ├── controller/ChatController.java   # /api/chat /api/import-image /api/commit /api/orchestrate(SSE) /api/health
 │       └── orchestrator/Orchestrator.java   # SSE 薄转发：POST 8001/supervise?stream=1 → 读帧 → 透传前端
 ├── agent-service/      # Python Agent 微服务（编排大脑）
-│   ├── app.py          # FastAPI: /chat /supervise(JSON+SSE) /commit /import-image /agent/{name} /route /health
-│   ├── requirements.txt
+│   ├── app.py          # FastAPI: /chat /supervise(JSON+SSE) /commit /import-image /plan* /memory /sessions /agent/{name} /health
+│   ├── requirements.txt / requirements-dev.txt / requirements-ocr.txt
 │   ├── .env            # 含 LLM_API_KEY（已被根目录 .gitignore 排除，切勿提交）
 │   ├── data/           # 记忆与训练记录（自动生成）
+│   ├── tests/          # pytest：解析 / 意图 / 分析 / 存储 / HTTP 鉴权
+│   ├── skills/         # 4 个可插拔教练技能（SKILL.md，按触发词动态挂载）
+│   ├── _dump_prompt.py # 诊断工具：打印任意输入真正发给 LLM 的完整提示词（4 层拼装结果，排障/自查用）
 │   └── src/
 │       ├── orchestrator.py      # SupervisorAgent：_plan(LLM拆解)/_dispatch(代码门控派发)/_synthesize(主Agent收口)
-│       ├── supervisor.py        # 单 Agent 关键词路由（子 Agent 入口复用）
-│       ├── sport_data.py        # SportStore：暂存队列 _STAGED / stage / commit / discard
+│       ├── supervisor.py        # 单 Agent 关键词路由（健身域统一归 coach 直答）
+│       ├── sport_data.py        # SportStore：暂存队列 _STAGED + 周聚合/环比/日负荷/ACWR 确定性计算
+│       ├── plan_store.py        # 计划库：pending 两段确认 / 切换 / 删除
+│       ├── skill_loader.py      # Skill 三级渐进加载 + 蒸馏 / patch
+│       ├── memory.py            # 双存储记忆（文件锁并发保护）
 │       └── agents/              # 10 个专业子 Agent + 注册表 agent_catalog
 │           ├── recorder_agent.py / analyst_agent.py / searcher_agent.py
 │           ├── clinician_agent.py / expert_agent.py / planner_agent.py
 │           ├── memory_agent.py / scheduler_agent.py / writer_agent.py / general_agent.py
+│           ├── reviewer_agent.py   # 评审：PASS / ISSUES 协议
 │           └── base.py         # BaseAgent._llm：空串注入哨兵兜底文案（供门控识别）
 ├── frontend/           # Vue 3
 │   ├── package.json / vite.config.ts
 │   └── src/
 │       ├── views/Chat.vue        # 聊天 + 图片上传 + 连接灯 + 动态 AgentChainBoard（plan 预填链条 / pending_commit 确认按钮）
 │       └── api/client.ts         # chat / health / importImage / orchestrate(EventSource) / commitRecords
-├── start-all.bat       # 一键启动三服务（各自独立窗口，需先 mvn 编译）
+├── start-all.bat       # 一键启动三服务（各自独立窗口；启动前清空代理变量，防 TLS 被本机代理掐断）
+├── _token_check.py     # 诊断工具：子 Agent 上下文体量对照（全量记忆+20轮历史 vs 按需召回+关历史，打桩不触网）
 ├── docker-compose.yml  # 三服务编排（见下方「Docker 部署」说明，当前需补 Dockerfile）
 ├── .gitignore          # 排除 .env 密钥 / 构建产物 / 运行时数据
 └── 架构方案.md         # 完整架构、接口契约、演进路线
@@ -191,6 +210,30 @@ LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-
 
 ## 更新日志（迭代脉络）
 
+### 2026-09-07 伤痛提示词冲突修复 + 运维加固 + 仓库清理
+- **修复提示词自相矛盾**：`coach._build_prompt` 曾把 focus 提取的词**无条件**拼进
+  「请给一份具体的『XX训练日』」——问「我膝盖疼还能跑吗」会被引导去排"膝盖疼训练日"，
+  与同时注入的 `posture_relief` SOP（定位诱因 → 康复动作 → 就医红线）正面冲突。
+  根因是**意图分类与提示词构建用了两套判断**：抽出 `_PAIN_WORDS` + `_is_pain()` 共用同一份，
+  伤痛命中时改走康复引导语。61 个测试全绿。
+- **运维坑固化**：`start-all.bat` 启动前清空 `HTTP(S)_PROXY`——本机代理会让 Python 的
+  urllib 到 api.deepseek.com 的 TLS 握手被掐断（`SSL: UNEXPECTED_EOF_WHILE_READING`），
+  表现为 `/chat` 一律降级；且 curl 走同一代理是通的，极易误判。DeepSeek 为国内服务，直连即可。
+- **仓库清理**：删除 9 个临时冒烟输出（`_smoke*.txt` / `_sup*.json` / `_uvicorn_smoke*.log`）
+  与已完成使命的验证脚本（`_week_check.py`，注释即写"验证完即删"）；
+  移除 `pom.xml` 中从未启用的 langgraph4j 注释依赖块。
+
+### 2026-09-03 教练技能落地 + 运动科学数据引擎
+- **skills/ 落地 4 个可插拔教练技能**（心率区间、久坐缓解、力量记录解析、跑步记录解析），
+  skill_loader 按用户输入动态挂载——扩能力不改主流程代码；测试套件随本提交入库
+- **SportStore 数据引擎**：周聚合（ISO 周，只列有记录的周）、周环比（缺口如实标注、不伪造插值）、
+  日负荷、**ACWR 急慢性负荷比**（运动医学伤病风险指标；>14 天停练返回 stale，不把长休误判为减训）
+- 修复空回复、带 × 号的力量记录解析、伤痛意图路由
+
+### 2026-08-24 健身域统一路由：单 persona 直答
+- 跑步/减脂/增肌/练部位/伤痛/计划等健身域问题统一路由至 coach（谭成义人格）单 Agent 直答；
+  编排仅保留给周报等复杂任务——多数请求单次调用完成，响应速度与人设稳定性兼得
+
 ### 2026-09-02 安全与质量加固（面试导向的一轮硬化）
 - **鉴权**：FastAPI 增加 `X-Agent-Token` 中间件（`AGENT_AUTH_TOKEN` 控制），Spring 拦截器透传、Vite 代理带头；旧版 server.py CORS `*` 收紧 + 同 token 校验。
 - **并发**：`memory.py` / `plan_store.py` 文件读改写加锁（RLock 处理 apply_pending→active_plan 重入），16 线程并发 append 回归测试零丢失。
@@ -274,9 +317,10 @@ LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-
 - **图片导入链路**：前端拖拽/点击/粘贴截图 → 本地 OCR + LLM 解析 →（现为先暂存后确认）
 
 ### 诚实说明（尚未完成）
-- Docker 部署仍不可用（缺 Dockerfile）
+- Docker 部署仍不可用（缺 Dockerfile；需先补 `.dockerignore` 排除 .env 与 data/）
 - 长期记忆 USER.md 仍需「记住/记下」触发 + 真实 key 才落盘
 - 子 Agent 的语义质量（答非所问/数据编错）尚无自动化评测，靠主 Agent 综合阶段人工兜底
+- 意图路由准确率尚未标注评测（计划：50 条真实消息跑混淆矩阵）
 
 ## 接口契约
 
@@ -303,6 +347,14 @@ LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-
 ```
 前端「确认入库」→ POST /api/commit → Spring Boot → POST http://localhost:8001/commit
         → commit_staged() 把暂存区记录整批落库 → {ok, msg, count}
+```
+
+**只读展示（前端经 Vite `/agent` 代理直连 8001，不过 Spring Boot）**
+```
+GET /sessions?limit=N   → 最近训练（含心率区间/配速/负荷等结构化字段，供图表渲染）
+GET /memory             → 长期记忆（USER 关于用户 / MEMORY 助理笔记）
+GET /plan               → 计划库（activeId / pending 待确认 / plans 列表）
+POST /plan/apply | /plan/switch | /plan/delete | /plan/generate | /plan/discard
 ```
 
 agent-service 还提供：
