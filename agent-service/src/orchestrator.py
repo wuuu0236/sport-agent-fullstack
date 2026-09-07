@@ -50,7 +50,10 @@ def _fallback_plan(task: str) -> list:
              "expect": "最新训练方法与赛事资料"},
             {"id": "s2", "agent": "analyst", "input": "分析我的最近训练",
              "expect": "用户训练数据分析"},
-            {"id": "s3", "agent": "planner", "input": task,
+            # s3 必须引用 @s1/@s2：否则拆解失败走兜底时，
+            # planner 只拿到原始任务，前两步的资料与分析等于白跑
+            {"id": "s3", "agent": "planner",
+             "input": f"{task}\n\n请结合 @s1 的最新资料与 @s2 的训练数据分析，综合完成本任务",
              "expect": "综合成训练周报/计划"},
         ]
     # 单 agent 类：关键词路由给一个子 Agent
