@@ -26,8 +26,8 @@ from src.supervisor import route
 from src.agents import get_agent
 from src.agents.memory_agent import is_memory_intent
 from src.agents.coach_agent import _user_max_hr
-from src.skill_loader import (match_skills, is_distill_intent, is_patch_intent,
-                              distill_skill, patch_skill)
+from src.skill_loader import (match_skills, match_skills_for, is_distill_intent,
+                              is_patch_intent, distill_skill, patch_skill)
 from src.server import image_import, _import_save
 from src.sport_data import SportStore
 from src.orchestrator import SupervisorAgent
@@ -180,7 +180,9 @@ def chat(req: ChatReq):
                              "skill_hits": sv.used_skills}}
     name = route(req.message)
     agent = get_agent(name)
-    skills = match_skills(req.message)
+    # 技能注入带主理 Agent 门控：只给本 Agent 该吃的 SOP（避免解析 SOP 串进教练分析）；
+    # coach 例外吸收 clinician/expert 技能，保证伤痛回答不丢康复与就医红线。
+    skills = match_skills_for(req.message, agent.name)
     ctx = {"skills": skills}
     if req.context:
         ctx.update(req.context)
@@ -199,7 +201,7 @@ def chat(req: ChatReq):
 @app.post("/agent/{name}")
 def agent_call(name: str, req: AgentReq):
     agent = get_agent(name)
-    skills = match_skills(req.input)
+    skills = match_skills_for(req.input, get_agent(name).name)
     ctx = {"skills": skills}
     if req.context:
         ctx.update(req.context)
@@ -493,7 +495,7 @@ def _coach_answer(msg: str) -> str:
     保证用户始终从蒸馏到的谭成义视角得到回答，而非被多 Agent 拆成通用内容。
     """
     agent = get_agent("coach")
-    skills = match_skills(msg)
+    skills = match_skills_for(msg, "coach")
     try:
         return agent.handle(msg, {"skills": skills})
     except Exception as e:

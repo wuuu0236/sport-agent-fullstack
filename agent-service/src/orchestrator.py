@@ -21,7 +21,7 @@ import re
 
 from . import config, llm, memory
 from .agents import get_agent, agent_catalog
-from .skill_loader import match_skills
+from .skill_loader import match_skills_for
 from .sport_data import SportStore
 
 # 步骤引用：input 里的 @s1 在执行时替换为 s1 的真实产出（截断防超长）
@@ -190,13 +190,9 @@ class SupervisorAgent:
            目的：避免把"解析入库"的 SOP 灌给 planner 造成跨职责串味——
            与 f7559d6 修的「技能 vs 人格冲突」同类，这里在入口就拦掉。
         """
-        hits = match_skills(task or "")
-        picked = []
-        for s in hits:
-            owner = (s.get("agent") or "").strip()
-            if not owner or owner == agent_name:
-                picked.append(s)
-        return picked
+        # 门控规则与单 Agent 路径共用（见 skill_loader.match_skills_for），
+        # 避免两处各写一套判定、改一处漏一处。
+        return match_skills_for(task or "", agent_name)
 
     def _dispatch(self, name: str, inp: str, results: dict, task: str = "") -> str:
         # 依赖引用解析：@s1 → 替换为 s1 的真实产出（隔离回收的产物，截断防超长）

@@ -6,7 +6,8 @@
    2026-09-07 修：「配速」同时挂在 run_log_parse 与 coach_hr_zones。
 2. 典型消息的命中集合稳定——避免改触发词时把别的场景改坏。
 """
-from src.skill_loader import load_skills, match_skills
+from src.skill_loader import load_skills, match_skills, match_skills_for
+from src.orchestrator import SupervisorAgent
 
 
 def _names(msg):
@@ -41,3 +42,32 @@ def test_run_log_still_hits_parse_skill():
 
 def test_pain_query_hits_posture_skill():
     assert _names("我膝盖疼还能跑吗") == ["posture_relief"]
+
+
+# ---------- 主理 Agent 门控（match_skills_for）----------
+
+def _gated(msg, agent):
+    return [s["name"] for s in match_skills_for(msg, agent)]
+
+
+def test_coach_absorbs_clinician_skill():
+    """关键回归：健身域统一 coach 直答后，伤痛回答不能丢康复 SOP 与就医红线。"""
+    assert "posture_relief" in _gated("我膝盖疼还能跑吗", "coach")
+
+
+def test_recorder_does_not_get_analysis_skill():
+    """解析类请求不该同时注入心率分析 SOP（此前「记一次5公里跑步配速6分」双命中）。"""
+    picked = _gated("记一次5公里跑步配速6分", "recorder")
+    assert picked == ["run_log_parse"]
+
+
+def test_coach_does_not_get_parse_skill():
+    """教练做分析时不该被灌「解析入库」SOP。"""
+    picked = _gated("深蹲后膝盖不适，帮我分析下训练负荷", "coach")
+    assert "strength_log_parse" not in picked
+    assert "posture_relief" in picked
+
+
+def test_orchestration_planner_gated_too():
+    """编排路径与单 Agent 路径共用同一套门控（避免两处判定不一致）。"""
+    assert SupervisorAgent()._skills_for_step("planner", "记一次5公里跑步") == []

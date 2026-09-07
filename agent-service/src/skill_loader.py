@@ -118,6 +118,31 @@ def match_skills(message: str):
     return hits
 
 
+def match_skills_for(message: str, agent_name: str):
+    """按「触发词命中 + 主理 Agent 门控」筛选技能（单 Agent / 编排路径共用）。
+
+    match_skills 只回答"哪些技能触发了"，不回答"该不该给这个 Agent"。
+    直接把全部命中塞给任意 Agent，会让「解析入库」的 SOP 串进 planner/教练的分析回答里
+    ——与 f7559d6 修的「技能 vs 人格冲突」同类，只是这次是技能跨职责串味。
+
+    门控规则（2026-09-07）：
+    1. 技能未声明主理 agent（如用户蒸馏的技能）→ 对所有 Agent 开放；
+    2. 声明了且与本步 Agent 同名 → 注入；
+    3. **coach 例外吸收 clinician / expert 类技能**——f7559d6 之后健身域统一由
+       coach 直答（含伤痛），若按同名规则过滤，伤痛回答会丢掉 posture_relief 的
+       康复动作与就医红线，这是不可接受的回归，故给 coach 开这个白名单。
+    """
+    hits = match_skills(message)
+    picked = []
+    for s in hits:
+        owner = (s.get("agent") or "").strip()
+        if not owner or owner == agent_name:
+            picked.append(s)
+        elif agent_name == "coach" and owner in ("clinician", "expert"):
+            picked.append(s)
+    return picked
+
+
 def skill_block(hits) -> str:
     """Tier 3：把命中的 skill 正文拼成可注入 system_prompt 的文本块。"""
     if not hits:
