@@ -79,6 +79,20 @@ def set_pending(plan: dict) -> dict:
         return plan
 
 
+def stage_and_apply(plan: dict, action: str) -> dict:
+    """原子地「暂存一份计划并立即应用」。
+
+    set_pending + apply_pending 分开调用时，两步之间锁会释放——
+    并发下另一线程的 set_pending 会覆盖 pending，导致计划丢失
+    （test_concurrent_apply_no_loss 捕捉的正是这个缺陷）。
+    本方法在同一次持锁内完成两步（RLock 同线程可重入），
+    供并发场景使用；编排产出→用户稍后确认的正常流程仍用两个分开的函数。
+    """
+    with _LOCK:
+        set_pending(plan)
+        return apply_pending(action)
+
+
 def apply_pending(action: str) -> dict:
     """将 pending 计划应用为 replace（替换当前计划）或 add（新增备选方案）。
 

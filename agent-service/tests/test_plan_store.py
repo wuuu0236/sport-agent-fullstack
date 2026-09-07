@@ -100,8 +100,9 @@ class TestConcurrency:
         plans.apply_pending("replace")
 
         def worker(name):
-            plans.set_pending({"name": name, "goal": name, "content": name})
-            plans.apply_pending("add")
+            # 并发场景必须走原子组合操作：分开调 set_pending + apply_pending
+            # 两步间锁会释放，另一线程的 pending 会覆盖当前线程的（丢计划）
+            plans.stage_and_apply({"name": name, "goal": name, "content": name}, "add")
 
         threads = [threading.Thread(target=worker, args=(n,)) for n in ("X", "Y")]
         for t in threads:
