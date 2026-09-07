@@ -26,7 +26,8 @@ from src.supervisor import route
 from src.agents import get_agent
 from src.agents.memory_agent import is_memory_intent
 from src.agents.coach_agent import _user_max_hr
-from src.skill_loader import match_skills
+from src.skill_loader import (match_skills, is_distill_intent, is_patch_intent,
+                              distill_skill, patch_skill)
 from src.server import image_import, _import_save
 from src.sport_data import SportStore
 from src.orchestrator import SupervisorAgent
@@ -87,6 +88,22 @@ def chat(req: ChatReq):
     # 短期会话记忆落盘：用户消息先 append，助理回复后再 append。
     # BaseAgent._llm 会自动把最近 N 条 session_turns 注入上下文，多轮追问才有记忆。
     memory.append_session("user", req.message)
+
+    # 技能蒸馏 / 补丁（元动作，整体优先）：
+    # 「存技能：<主题> <正文>」「patch 技能 <name>：<补丁>」原先只在旧入口 server.py
+    # 处理，全栈化后线上入口 app.py 没接，用户说「存技能」会被当成普通消息路由掉，
+    # 技能自进化闭环在主路径等于断的（2026-09-07 修）。
+    # 必须整体处理、不拆分：技能正文常含句号，走多意图拆分会拆坏正文。
+    if is_distill_intent(req.message) or is_patch_intent(req.message):
+        try:
+            if is_distill_intent(req.message):
+                out = distill_skill(req.message)
+            else:
+                out = patch_skill(req.message)
+        except Exception as e:
+            out = f"技能操作失败：{e}"
+        memory.append_session("assistant", out)
+        return {"agent": "skill", "output": out, "metadata": {}}
 
     # 计划应用意图（必须最先判断）：用户对待确认计划回复「替换当前计划」/「加入第二方案」。
     # 注意：不能放到记忆意图之后——「加入」是记忆触发词之一，会误被 is_memory_intent
