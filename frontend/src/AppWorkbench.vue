@@ -1,32 +1,48 @@
 <template>
-  <div class="workbench" :style="wallpaperStyle">
-    <!-- 左侧图标导航 -->
+  <div class="workbench" :style="{ ...wallpaperStyle, '--mod': currentHue }">
+    <!-- 氛围层：模块专属色晕 + 极淡网格（有壁纸时隐藏，避免叠加浑浊） -->
+    <div v-if="!wallpaper" class="ambient" aria-hidden="true">
+      <span class="blob b1" />
+      <span class="blob b2" />
+      <span class="grid-lines" />
+    </div>
+
+    <!-- 左侧极窄导航 -->
     <nav class="rail">
-      <div class="rail-modules">
+      <div class="brand" title="战狼养成计划">
+        <span class="brand-mark" v-html="ICONS.brand" />
+        <span class="brand-name">战狼</span>
+      </div>
+
+      <div class="nav">
         <button
           v-for="m in MODULES"
           :key="m.id"
-          class="rail-btn"
+          class="nav-btn"
           :class="{ active: current === m.id }"
-          :title="m.name"
+          :style="{ '--mod': m.hue }"
           @click="current = m.id"
         >
-          <span class="rail-icon" v-html="m.iconSvg"></span>
-          <span class="rail-label">{{ m.name }}</span>
+          <span class="nav-ico" v-html="m.iconSvg" />
+          <span class="nav-txt">{{ m.name }}</span>
         </button>
       </div>
-      <button class="rail-btn rail-settings" title="外观设置" @click="showSettings = true">
-        <span class="rail-icon" v-html="SETTINGS_ICON"></span>
-        <span class="rail-label">外观</span>
+
+      <button class="nav-btn ghost" title="外观设置" @click="showSettings = true">
+        <span class="nav-ico" v-html="ICONS.palette" />
+        <span class="nav-txt">外观</span>
       </button>
     </nav>
 
-    <!-- 主工作区：按当前模块动态渲染，并染上该模块专属浅灰白底色 -->
-    <main class="stage" :class="'stage-' + current">
-      <component :is="currentView" />
+    <!-- 主工作区：视图切换带淡入上浮过渡，KeepAlive 保留各模块状态 -->
+    <main class="stage">
+      <Transition name="view" mode="out-in">
+        <KeepAlive>
+          <component :is="currentView" :key="current" />
+        </KeepAlive>
+      </Transition>
     </main>
 
-    <!-- 外观设置（暗色主题 + 自定义壁纸） -->
     <ThemeSettings
       :open="showSettings"
       :wallpaper="wallpaper"
@@ -37,7 +53,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ChatView from './views/Chat.vue'
 import DashboardView from './views/DashboardView.vue'
 import MemoryView from './views/MemoryView.vue'
@@ -45,43 +61,53 @@ import PlanView from './views/PlanView.vue'
 import ThemeSettings from './components/ThemeSettings.vue'
 import { loadWallpaper, saveWallpaper, resolveWallpaperBackground } from './utils/wallpaper'
 
-// 小众线性图标（自绘 SVG，stroke 随主题色）：对话 / 数据 / 记忆 / 外观
-const ICON_STROKE =
-  'fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"'
-const ICONS = {
-  chat:
-    `<svg viewBox="0 0 24 24" ${ICON_STROKE}>` +
-    `<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H11l-4.4 3.3a.55.55 0 0 1-.88-.43V16H5.5A1.5 1.5 0 0 1 4 14.5z"/>` +
-    `<path d="M8.5 8.5h7M8.5 11.5h4"/></svg>`,
-  dashboard:
-    `<svg viewBox="0 0 24 24" ${ICON_STROKE}>` +
-    `<path d="M4.5 19V9"/><path d="M9.5 19V5"/><path d="M14.5 19v-7"/><path d="M19.5 19V3"/></svg>`,
-  plan:
-    `<svg viewBox="0 0 24 24" ${ICON_STROKE}>` +
-    `<path d="M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/><path d="M16 2v4M8 2v4M4 10h16M8 14h2v2H8zM12 14h2v2h-2zM16 14h2v2h-2z"/></svg>`,
-  memory:
-    `<svg viewBox="0 0 24 24" ${ICON_STROKE}>` +
-    `<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>` +
-    `<path d="M19 15l.7 2.1 2.1.7-2.1.7L19 20.6l-.7-2.1-2.1-.7 2.1-.7z"/></svg>`,
-  settings:
-    `<svg viewBox="0 0 24 24" ${ICON_STROKE}>` +
-    `<path d="M12 3a6.5 6.5 0 0 0 9 9 7.5 7.5 0 1 1-9-9z"/>` +
-    `<path d="M19 3v4M17 5h4"/></svg>`,
-}
-const SETTINGS_ICON = ICONS.settings
+const STROKE =
+  'fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"'
 
-// 工作台模块注册表：新增模块只需在这里加一项
+const ICONS = {
+  brand: `<svg viewBox="0 0 24 24" fill="none"><path d="M13.4 2.2 4.6 13.4h4.9l-1.6 8.4 9.3-11.6h-5z" fill="url(#brandGrad)"/><defs><linearGradient id="brandGrad" x1="4" y1="2" x2="18" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#7CC0FF"/><stop offset="1" stop-color="#2AD4C8"/></linearGradient></defs></svg>`,
+  chat:
+    `<svg viewBox="0 0 24 24" ${STROKE}><path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-6.6l-4 3.1a.5.5 0 0 1-.8-.4V16H6a2 2 0 0 1-2-2z"/><path d="M8.4 8.7h7.2M8.4 11.6h4.4"/></svg>`,
+  activity:
+    `<svg viewBox="0 0 24 24" ${STROKE}><path d="M3 12.5h3.6l2.2-6.3 3.6 12.2 2.4-7.1 1.6 3.6H21"/></svg>`,
+  calendar:
+    `<svg viewBox="0 0 24 24" ${STROKE}><rect x="3.4" y="5" width="17.2" height="15.6" rx="2.6"/><path d="M3.4 10h17.2M8.2 3.4v3.2M15.8 3.4v3.2M8.6 14.2h2.1v2.1H8.6zM13.3 14.2h2.1v2.1h-2.1z"/></svg>`,
+  sparkles:
+    `<svg viewBox="0 0 24 24" ${STROKE}><path d="M11.6 3.2 13.2 8l4.8 1.6L13.2 11.2 11.6 16 10 11.2 5.2 9.6 10 8z"/><path d="M18.4 14.6l.7 2.1 2.1.7-2.1.7-.7 2.1-.7-2.1-2.1-.7 2.1-.7z"/></svg>`,
+  palette:
+    `<svg viewBox="0 0 24 24" ${STROKE}><path d="M12 20.5a8.5 8.5 0 1 1 8.5-8.5c0 2.2-1.7 3.2-3.4 3.2h-1.4a1.9 1.9 0 0 0-1.4 3.2 1.6 1.6 0 0 1-1.2 2.1z"/><circle cx="8.4" cy="10.6" r="1.1" fill="currentColor" stroke="none"/><circle cx="12" cy="7.9" r="1.1" fill="currentColor" stroke="none"/><circle cx="15.6" cy="10.2" r="1.1" fill="currentColor" stroke="none"/></svg>`,
+}
+
+// 模块注册表：每项带专属色相 --mod，驱动导航高亮与氛围光
 const MODULES = [
-  { id: 'chat', name: '对话', iconSvg: ICONS.chat, view: ChatView },
-  { id: 'dashboard', name: '训练数据', iconSvg: ICONS.dashboard, view: DashboardView },
-  { id: 'plan', name: '计划', iconSvg: ICONS.plan, view: PlanView },
-  { id: 'memory', name: '记忆', iconSvg: ICONS.memory, view: MemoryView },
+  { id: 'chat', name: '对话', iconSvg: ICONS.chat, view: ChatView, hue: '#3d8bff' },
+  { id: 'dashboard', name: '数据', iconSvg: ICONS.activity, view: DashboardView, hue: '#2ad4c8' },
+  { id: 'plan', name: '计划', iconSvg: ICONS.calendar, view: PlanView, hue: '#8b7bff' },
+  { id: 'memory', name: '记忆', iconSvg: ICONS.sparkles, view: MemoryView, hue: '#f0b23c' },
 ]
 
 const current = ref<string>('chat')
+const currentHue = computed(() => MODULES.find((m) => m.id === current.value)?.hue ?? '#3d8bff')
 const currentView = computed(() => MODULES.find((m) => m.id === current.value)?.view ?? ChatView)
 
-// 壁纸铺满整个工作台
+// ---- 模块深链：URL hash 与当前模块双向同步（刷新/分享链接停在原模块） ----
+const VALID = new Set(MODULES.map((m) => m.id))
+function fromHash(): string {
+  const h = (location.hash || '').replace(/^#\/?/, '')
+  return VALID.has(h) ? h : 'chat'
+}
+current.value = fromHash()
+function onHashChange() {
+  const h = fromHash()
+  if (h !== current.value) current.value = h
+}
+watch(current, (v) => {
+  if (location.hash.replace(/^#\/?/, '') !== v) location.hash = '/' + v
+})
+onMounted(() => window.addEventListener('hashchange', onHashChange))
+onBeforeUnmount(() => window.removeEventListener('hashchange', onHashChange))
+
+// 壁纸：铺满整个工作台；未设置时显示默认氛围层
 const wallpaper = ref<string | null>(loadWallpaper())
 const wallpaperStyle = computed(() => resolveWallpaperBackground(wallpaper.value))
 const showSettings = ref(false)
@@ -93,105 +119,195 @@ function applyWallpaper(stored: string | null) {
 
 <style scoped>
 .workbench {
+  position: relative;
   display: flex;
-  min-height: 100vh;
-  background-color: var(--bg);
+  height: 100vh;
+  overflow: hidden;
+  background-color: var(--surface-0);
   background-size: cover;
   background-position: center;
-  background-attachment: fixed;
-  transition: background 0.2s;
 }
+
+/* ---------- 氛围层：两团柔光 + 细网格 ---------- */
+.ambient {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.5;
+  transition: background var(--t-slow) var(--ease-out);
+}
+.b1 {
+  width: 46vw;
+  height: 46vw;
+  top: -16vw;
+  left: 6vw;
+  background: radial-gradient(circle, color-mix(in srgb, var(--mod) 30%, transparent), transparent 68%);
+}
+.b2 {
+  width: 38vw;
+  height: 38vw;
+  right: -10vw;
+  bottom: -14vw;
+  background: radial-gradient(circle, rgba(42, 212, 200, 0.16), transparent 70%);
+}
+.grid-lines {
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+  background-size: 38px 38px;
+  mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, #000 30%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, #000 30%, transparent 100%);
+}
+
+/* ---------- 侧边导航 ---------- */
 .rail {
-  width: 244px;
+  position: relative;
+  z-index: var(--z-sticky);
+  width: var(--rail-w);
   flex: none;
-  height: 100vh;
-  position: sticky;
-  top: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 24px 16px;
-  background: color-mix(in srgb, var(--bg-soft) 80%, transparent);
-  backdrop-filter: blur(14px);
-  border-right: 1px solid var(--border);
-  z-index: 10;
-  align-items: stretch;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-3);
+  background: var(--glass);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  border-right: 1px solid var(--line);
 }
-/* 4 个主模块在侧边栏纵向居中，彼此保持较大间距 */
-.rail-modules {
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 0 14px;
+  width: 100%;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+.brand-mark {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  background: rgba(61, 139, 255, 0.1);
+  border: 1px solid var(--line-2);
+  box-shadow: var(--hairline-top);
+}
+.brand-mark :deep(svg) {
+  width: 21px;
+  height: 21px;
+}
+.brand-name {
+  font-size: 11px;
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.14em;
+  color: var(--ink-3);
+}
+
+.nav {
   flex: 1;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 32px;
-}
-.rail-settings {
-  flex: none;
-}
-.rail-btn {
   width: 100%;
   display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 14px;
-  padding: 20px 18px;
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--bg) 72%, transparent);
-  color: var(--muted);
-  cursor: pointer;
-  font-weight: 600;
-  transition: background 0.12s, color 0.12s, border-color 0.12s, box-shadow 0.12s;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
-}
-.rail-btn:hover {
-  background: var(--card-hover);
-  color: var(--text);
-  border-color: color-mix(in srgb, var(--text) 35%, var(--border));
-}
-.rail-btn.active {
-  background: var(--bg);
-  color: var(--text);
-  border-color: var(--text);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
-}
-.rail-btn.active .rail-label {
-  font-weight: 700;
-}
-.rail-icon {
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
+  flex-direction: column;
   justify-content: center;
+  gap: var(--sp-2);
+}
+
+.nav-btn {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 13px 4px 11px;
+  border-radius: var(--r-md);
+  color: var(--ink-3);
+  border: 1px solid transparent;
+  transition: color var(--t-base) var(--ease-out),
+    background var(--t-base) var(--ease-out), border-color var(--t-base) var(--ease-out);
+}
+.nav-btn:hover {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+/* 激活态：模块色淡染底 + 左侧发光条 */
+.nav-btn.active {
+  color: var(--mod);
+  background: color-mix(in srgb, var(--mod) 13%, transparent);
+  border-color: color-mix(in srgb, var(--mod) 30%, transparent);
+  box-shadow: var(--hairline-top);
+}
+.nav-btn.active::before {
+  content: '';
+  position: absolute;
+  left: -13px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 22px;
+  border-radius: var(--r-full);
+  background: var(--mod);
+  box-shadow: 0 0 12px var(--mod);
+}
+.nav-ico {
+  width: 21px;
+  height: 21px;
+  display: inline-flex;
+}
+.nav-ico :deep(svg) {
+  width: 100%;
+  height: 100%;
+}
+.nav-txt {
+  font-size: 12px;
+  font-weight: var(--fw-medium);
+  letter-spacing: 0.02em;
+}
+.nav-btn.active .nav-txt {
+  font-weight: var(--fw-semi);
+}
+.ghost {
   flex: none;
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 var(--r-md) var(--r-md);
+  padding-top: 15px;
 }
-.rail-icon :deep(svg) {
-  width: 28px;
-  height: 28px;
-}
-.rail-label {
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
+
+/* ---------- 主工作区 ---------- */
 .stage {
+  position: relative;
+  z-index: var(--z-content);
   flex: 1;
   min-width: 0;
   display: flex;
-  transition: background-color 0.25s ease;
 }
-/* 各模块专属深黑灰底色：同属黑灰系、仅色相微差，点击切换即凸显差异 */
-.stage-chat {
-  background-color: #1e2230;
+
+/* 视图切换：淡入 + 轻微上浮 */
+.view-enter-active {
+  transition: opacity var(--t-base) var(--ease-out),
+    transform var(--t-base) var(--ease-out);
 }
-.stage-dashboard {
-  background-color: #1d2622;
+.view-leave-active {
+  transition: opacity 130ms var(--ease-out), transform 130ms var(--ease-out);
 }
-.stage-plan {
-  background-color: #251f2e;
+.view-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
 }
-.stage-memory {
-  background-color: #2a231a;
+.view-leave-to {
+  opacity: 0;
+  transform: translateY(-5px);
 }
 </style>

@@ -1,0 +1,212 @@
+/* ============================================================================
+   富文本排版（.prose）—— Markdown 渲染结果的统一外观
+   用于：对话消息（v-html）、计划内容（v-html）
+   设计要点：表格做成「卡片内嵌表格」（圆角 + 表头分层 + 斑马纹），
+            标题带上下留白节奏，代码块用独立深色底。
+   ========================================================================== */
+
+.prose {
+  font-size: var(--fs-base);
+  line-height: var(--lh-loose);
+  color: var(--ink-2);
+  word-break: break-word;
+}
+
+.prose > *:first-child {
+  margin-top: 0;
+}
+.prose > *:last-child {
+  margin-bottom: 0;
+}
+
+/* ---------- 标题 ---------- */
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  color: var(--ink);
+  font-weight: var(--fw-semi);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.01em;
+  margin: 26px 0 12px;
+}
+.prose h1 {
+  font-size: var(--fs-xl);
+}
+.prose h2 {
+  font-size: var(--fs-lg);
+}
+.prose h3 {
+  font-size: var(--fs-md);
+}
+.prose h4 {
+  font-size: var(--fs-base);
+  color: var(--ink-2);
+}
+
+/* 二级标题加一条渐变短横，作为段落视觉锚点 */
+.prose h2 {
+  padding-left: 12px;
+  position: relative;
+}
+.prose h2::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.28em;
+  bottom: 0.28em;
+  width: 3px;
+  border-radius: var(--r-full);
+  background: var(--grad-accent);
+}
+
+/* ---------- 正文 ---------- */
+.prose p {
+  margin: 10px 0;
+}
+.prose strong {
+  color: var(--ink);
+  font-weight: var(--fw-semi);
+}
+.prose em {
+  color: var(--ink-2);
+}
+
+.prose ul,
+.prose ol {
+  margin: 10px 0;
+  padding-left: 4px;
+}
+.prose ul > li,
+.prose ol > li {
+  position: relative;
+  padding-left: 20px;
+  margin: 6px 0;
+}
+.prose ul > li::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 0.72em;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.75;
+}
+.prose ol {
+  counter-reset: prose-ol;
+}
+.prose ol > li {
+  counter-increment: prose-ol;
+}
+.prose ol > li::before {
+  content: counter(prose-ol);
+  position: absolute;
+  left: 0;
+  top: 0;
+  min-width: 15px;
+  height: 15px;
+  margin-top: 0.42em;
+  border-radius: var(--r-full);
+  background: rgba(61, 139, 255, 0.16);
+  color: var(--accent-hi);
+  font-size: 10px;
+  font-weight: var(--fw-bold);
+  line-height: 15px;
+  text-align: center;
+}
+
+/* ---------- 表格（卡片化） ---------- */
+.prose table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 16px 0;
+  font-size: var(--fs-sm);
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.prose thead th {
+  background: linear-gradient(180deg, var(--surface-3), var(--surface-2));
+  color: var(--ink);
+  font-weight: var(--fw-semi);
+  text-align: left;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line-2);
+  white-space: nowrap;
+}
+.prose tbody td {
+  padding: 10px 14px;
+  color: var(--ink-2);
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.prose tbody tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.014);
+}
+.prose tbody tr:hover td {
+  background: rgba(61, 139, 255, 0.05);
+}
+.prose tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* ---------- 代码 ---------- */
+.prose code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  padding: 2px 6px;
+  border-radius: var(--r-xs);
+  background: var(--surface-4);
+  color: #cfe4ff;
+  border: 1px solid var(--line);
+}
+.prose pre {
+  margin: 14px 0;
+  padding: 16px 18px;
+  border-radius: var(--r-md);
+  background: var(--pre-bg);
+  border: 1px solid var(--line);
+  box-shadow: var(--hairline-top);
+  overflow-x: auto;
+}
+.prose pre code {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--pre-text);
+  font-size: var(--fs-sm);
+  line-height: 1.7;
+}
+
+/* ---------- 引用 / 分隔线 ---------- */
+.prose blockquote {
+  margin: 14px 0;
+  padding: 12px 16px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  background: rgba(61, 139, 255, 0.07);
+  color: var(--ink-2);
+}
+.prose blockquote > *:first-child {
+  margin-top: 0;
+}
+.prose blockquote > *:last-child {
+  margin-bottom: 0;
+}
+
+.prose hr {
+  margin: 22px 0;
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--line-2), transparent);
+}
+
+.prose img {
+  max-width: 100%;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+}

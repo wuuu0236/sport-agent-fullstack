@@ -1,30 +1,31 @@
 # sport-agent-fullstack
 
-个人体育训练助理的**全栈多智能体**版本。在原有 Python 零依赖 MVP（`sport-agent-mvp`）基础上，
+个人体育训练助理的**全栈多智能体**版本。在原有 Python 零依赖 MVP（`sport-agent-mvp`）基础上，  
 升级为产品级混合栈：**Spring Boot 做网关层，Python(FastAPI) 做 Agent 能力微服务（含主-从多 Agent 编排），Vue 做前端**。
 
-> 设计核心：**分级响应**——健身域问题统一由谭成义人格教练单 Agent 直答（多数请求单次调用完成），
-> 多源汇合任务（周报 / 阶段总结 / 数据驱动计划）才升级多 Agent 编排：主 Agent（Supervisor）把任务拆解后显式派发给
-> 各子 Agent 隔离执行，只回收摘要。**「拆解是模型的判断，派发/验收是代码的门控」**，
+> 设计核心：**分级响应**——健身域问题统一由谭成义人格教练单 Agent 直答（多数请求单次调用完成），  
+> 多源汇合任务（周报 / 阶段总结 / 数据驱动计划）才升级多 Agent 编排：主 Agent（Supervisor）把任务拆解后显式派发给  
+> 各子 Agent 隔离执行，只回收摘要。**「拆解是模型的判断，派发/验收是代码的门控」**，  
 > 杜绝模型答跑偏还把结果硬塞给用户。
 
 ## 项目亮点（为什么值得讲）
 
-1. **Claude Code 式主-从多 Agent 协作（分级触发）**——健身域问题统一由谭成义人格教练单 Agent 直答；
-   多源汇合任务才升级编排（周报 / 阶段总结 / 数据驱动计划三类特征，`_needs_orchestration`）：主 Agent 用 LLM 把任务拆成结构化子任务（强 JSON schema，≤4 步、子 Agent 白名单校验），
-   逐节点**代码门控派发**，只回收产出摘要（截断防超长），最后由主 Agent 亲自综合收口。
-   执行类子 Agent（记录解析 / 数据计算 / 康复知识库）以确定性代码为主，不依赖 LLM 自觉。
+1. **Claude Code 式主-从多 Agent 协作（分级触发）**——健身域问题统一由谭成义人格教练单 Agent 直答；  
+   多源汇合任务才升级编排（周报 / 阶段总结 / 数据驱动计划三类特征，`_needs_orchestration`）：主 Agent 用 LLM 把任务拆成结构化子任务（强 JSON schema，**拆几步、派给谁、写不写 @**、子 Agent 白名单校验），  
+   逐节点**代码门控派发**，只回收产出摘要（截断防超长），最后由主 Agent 亲自综合收口。  
+   执行类子 Agent（记录解析 / 数据计算 / 康复知识库）以确定性代码为主，不依赖 LLM 自觉。  
    协作全程通过 **SSE 实时推送**到前端看板：拆解了哪几步、谁在跑、谁失败、谁产出，全部**肉眼可见**。
-2. **子 Agent 独立工作空间**——写库子 Agent（recorder）解析结果先进**暂存区**，主循环结束发 `pending_commit`
+2. **子 Agent 独立工作空间**——写库子 Agent（recorder）解析结果先进**暂存区**，主循环结束发 `pending_commit`  
    事件，前端确认后才 `/commit` 落库。图片导入同样先暂存（顺带修复「导入即入库」的 P0-3 回归）。
-3. **失败门控**——子 Agent 空返回/空串兜底文案（哨兵）→ 判该节点失败（`agent_error`）、跳过继续，
+3. **失败门控**——子 Agent 空返回/空串兜底文案（哨兵）→ 判该节点失败（`agent_error`）、跳过继续，  
    绝不把模型废话当产出喂给下一步；综合阶段空/异常自动降级为「如实汇总各节点真实产出」。
-4. **依赖链 `@s1` 引用**——LLM 拆解时若判断某步需要前序结果，在 input 里写 `@s2`，执行时代码替换成
+4. **依赖链 `@s1` 引用**——LLM 拆解时若判断某步需要前序结果，在 input 里写 `@s2`，执行时代码替换成  
    前序节点真实产出（截断 400 字），子 Agent 成果在代码层串起来，不靠模型"记得"。
 5. **本地隐私优先**——训练截图走**本地 OCR**，图片永不离开本机，解析后先暂存、确认后结构化落库。
-6. **可演进架构**——Java 网关层**改为薄转发**，把 8001 的 SSE 事件流原样透传前端；
+6. **可演进架构**——Java 网关层**改为薄转发**，把 8001 的 SSE 事件流原样透传前端；  
    Agent 能力全部收敛在 `agent-service/src`（Python），换引擎/加 Agent 不动前端契约。
 7. **优雅降级**——无 LLM key 时自动 mock，三服务依旧跑通；LLM 拆解失败回退代码模板计划，永不空转。
+
 
 ## 多 Agent 协作机制（主-从分发）
 
@@ -43,26 +44,28 @@
 ```
 
 **子 Agent 名录**（`agent-service/src/agents/`），按实现方式分两类：
-- **执行型（确定性代码，不依赖 LLM 自觉）**：`recorder`(正则解析训练描述→暂存)、
+
+- **执行型（确定性代码，不依赖 LLM 自觉）**：`recorder`(正则解析训练描述→暂存)、  
   `analyst`(心率区间/TRIMP/渐进趋势计算)、`clinician`(疼痛排查/康复动作知识库 + 就医红线)；
-- **生成型（LLM + 受控注入）**：`searcher`(联网搜索 + 诚实降级)、`expert`(知识问答 + 用户基线注入)、
-  `planner`(周报/计划综合，强制全量注入用户画像)、`memory`(长期记忆)、`scheduler`(日程提醒)、
+- **生成型（LLM + 受控注入）**：`searcher`(联网搜索 + 诚实降级)、`expert`(知识问答 + 用户基线注入)、  
+  `planner`(周报/计划综合，强制全量注入用户画像)、`memory`(长期记忆)、`scheduler`(日程提醒)、  
   `writer`(文案写作)、`general`(兜底)；
-- 另有 `reviewer`(评审 Agent，PASS/ISSUES 协议) 供编排收口前复核；
+- 另有 `reviewer`(评审 Agent，PASS/ISSUES 协议) 供编排收口前复核；  
   **`coach`(谭成义人格教练) 是独立入口而非别名**——健身域问题统一由它单 Agent 直答。
 - 保留旧别名：`research`→searcher、`posture`→clinician、`memorist`→memory。
 - 编排触发：三类多源汇合特征升级编排（`_needs_orchestration`：周报 / 阶段总结+时间范围 / 数据驱动计划三要素齐），记录类与健身域问答不进主循环。
 
 ## 技术栈（混合栈）
 
-| 层 | 技术 |
-|---|---|
-| 前端 | Vue 3 + Vite（AgentChainBoard 动态看板 + SSE EventSource） |
-| 网关 | Spring Boot 3（薄转发：/api/chat、/api/import-image、/api/orchestrate、/api/commit） |
-| Agent 能力层 | Python + FastAPI 微服务：SupervisorAgent 主循环 + 10 个专业子 Agent |
-| 记忆 | 双存储 USER.md / MEMORY.md（冻结快照注入）+ Skill 三级渐进加载 + session 短期记忆 |
-| 数据引擎 | SportStore 确定性计算：周聚合 / 周环比（缺口如实标注）/ 日负荷 / ACWR 急慢性负荷比（伤病风险） |
-| LLM | DeepSeek `deepseek-v4-flash`（OpenAI 兼容接口，无 key 自动 mock 降级） |
+| 层         | 技术                                                                          |
+| --------- | --------------------------------------------------------------------------- |
+| 前端        | Vue 3 + Vite（设计令牌体系 + 4 模块工作台 + 自研 SVG 图表 + SSE EventSource；多 Agent 协作走内联时间轴） |
+| 网关        | Spring Boot 3（薄转发：/api/chat、/api/import-image、/api/orchestrate、/api/commit） |
+| Agent 能力层 | Python + FastAPI 微服务：SupervisorAgent 主循环 + 10 个专业子 Agent                    |
+| 记忆        | 双存储 USER.md / MEMORY.md（冻结快照注入）+ Skill 三级渐进加载 + session 短期记忆                |
+| 数据引擎      | SportStore 确定性计算：周聚合 / 周环比（缺口如实标注）/ 日负荷 / ACWR 急慢性负荷比（伤病风险）                 |
+| LLM       | DeepSeek `deepseek-v4-flash`（OpenAI 兼容接口，无 key 自动 mock 降级）                  |
+
 
 ## 目录结构
 
@@ -95,11 +98,19 @@ sport-agent-fullstack/
 │           ├── memory_agent.py / scheduler_agent.py / writer_agent.py / general_agent.py
 │           ├── reviewer_agent.py   # 评审：PASS / ISSUES 协议
 │           └── base.py         # BaseAgent._llm：空串注入哨兵兜底文案（供门控识别）
-├── frontend/           # Vue 3
+├── frontend/           # Vue 3 + Vite（设计令牌 + 组件分层）
 │   ├── package.json / vite.config.ts
 │   └── src/
-│       ├── views/Chat.vue        # 聊天 + 图片上传 + 连接灯 + 动态 AgentChainBoard（plan 预填链条 / pending_commit 确认按钮）
-│       └── api/client.ts         # chat / health / importImage / orchestrate(EventSource) / commitRecords
+│       ├── styles/          # tokens.css（设计令牌）/ base.css（reset+动效）/ prose.css（Markdown 排版）
+│       ├── components/
+│       │   ├── ui/          # AppCard / StatTile / AppButton / AppPill / SectionTitle / EmptyState / SkeletonBlock / StatusDot
+│       │   ├── charts/      # LineChart（渐变面积+平滑曲线+悬停提示）/ ZoneBar（心率区间）
+│       │   ├── chat/        # SessionList / ChatHeader / MessageBubble / ThinkingTrace（多 Agent 时间轴）/ ChatComposer / ProfilePanel / PendingCommitCard / DropOverlay
+│       │   └── ThemeSettings.vue   # 外观抽屉：预设色块 + 自定义壁纸
+│       ├── composables/     # useSessions（多会话持久化）/ useAgentChat（发送/编排/导入/确认/画像）
+│       ├── constants/agents.ts     # 子 Agent 中文名 + 职责 + 图标 + 色相
+│       ├── views/           # Chat / DashboardView / PlanView / MemoryView
+│       └── api/client.ts    # chat / health / importImage / orchestrate(EventSource) / commitRecords / plan / memory
 ├── start-all.bat       # 一键启动三服务（各自独立窗口；启动前清空代理变量，防 TLS 被本机代理掐断）
 ├── _token_check.py     # 诊断工具：子 Agent 上下文体量对照（全量记忆+20轮历史 vs 按需召回+关历史，打桩不触网）
 ├── docker-compose.yml  # 三服务编排（见下方「Docker 部署」说明，当前需补 Dockerfile）
@@ -107,14 +118,16 @@ sport-agent-fullstack/
 └── 架构方案.md         # 完整架构、接口契约、演进路线
 ```
 
+
 ## 快速开始（开发模式，三服务分别启动）
 
 > 前置：JDK 17+、Maven 3.9+、Node 22+、Python 3.13
 >
-> 本机已就绪路径（供参考）：JDK17 `C:/Users/24162/tools/jdk17/jdk-17.0.20+8`、
+> 本机已就绪路径（供参考）：JDK17 `C:/Users/24162/tools/jdk17/jdk-17.0.20+8`、  
 > Maven `C:/Users/24162/tools/maven/apache-maven-3.9.9`、Node/Python 用 WorkBuddy 托管运行时。
 
 **1. agent-service（端口 8001）**
+
 ```bash
 cd agent-service
 pip install -r requirements.txt
@@ -122,43 +135,49 @@ python -m uvicorn app:app --port 8001 --host 127.0.0.1
 ```
 
 **2. backend（端口 8080，需 JDK17 + Maven）**
+
 ```bash
 cd backend
 mvn clean package -DskipTests
 java -jar target/sport-agent-backend-0.1.0.jar --server.port=8080
 ```
-> ⚠️ 本机环境（WorkBuddy 后台进程）会无视 `application.properties` 里的 `server.port`、
-> 把端口随机化成 5xxxx。务必在命令行**显式加 `--server.port=8080`**，否则前端代理连不上。
-> （已确认不是配置写错：jar 内 `BOOT-INF/classes/application.properties` 确实写了 8080，
+
+> ⚠️ 本机环境（WorkBuddy 后台进程）会无视 `application.properties` 里的 `server.port`、  
+> 把端口随机化成 5xxxx。务必在命令行**显式加 `--server.port=8080`**，否则前端代理连不上。  
+> （已确认不是配置写错：jar 内 `BOOT-INF/classes/application.properties` 确实写了 8080，  
 > 但仍被环境覆盖成随机端口，CLI 参数优先级最高，可强制锁回 8080。）
 
 **3. frontend（端口 5173）**
+
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-浏览器打开 **http://localhost:5173** （注意用 `localhost` 而非 `127.0.0.1`：
-Vite 默认绑 IPv6 `[::1]`，IPv4 的 127.0.0.1 连不上）。消息经 Vite 的 `/api` 代理
+
+浏览器打开 **<http://localhost:5173>** （注意用 `localhost` 而非 `127.0.0.1`：  
+Vite 默认绑 IPv6 `[::1]`，IPv4 的 127.0.0.1 连不上）。消息经 Vite 的 `/api` 代理  
 （见 `vite.config.ts`）到 Spring Boot(8080) → agent-service(8001)。
 
 ## 一键启动（可选）
 
 项目根目录提供 `start-all.bat`，一次性拉起三个服务到各自独立窗口（已内置 JDK17 / Node / Python 路径）：
+
 ```bat
 start-all.bat
 ```
-> 前提：`backend\target\sport-agent-backend-0.1.0.jar` 已构建——若 backend 窗口报找不到 jar，
-> 请先按上方「快速开始 · 步骤 2」执行 `mvn clean package -DskipTests`。
+
+> 前提：`backend\target\sport-agent-backend-0.1.0.jar` 已构建——若 backend 窗口报找不到 jar，  
+> 请先按上方「快速开始 · 步骤 2」执行 `mvn clean package -DskipTests`。  
 > 注意：脚本直接 `java -jar`，若 8080 已被占用会启动失败，先释放端口再跑。
 
 ## 安全（2026-09 加固）
 
-- **服务鉴权**：`agent-service/.env` 里 `AGENT_AUTH_TOKEN` 非空时，除 `/health` 外所有接口要求
-  请求头 `X-Agent-Token` 匹配（FastAPI 中间件）。防三类威胁：浏览器恶意网页打本机接口、
+- **服务鉴权**：`agent-service/.env` 里 `AGENT_AUTH_TOKEN` 非空时，除 `/health` 外所有接口要求  
+  请求头 `X-Agent-Token` 匹配（FastAPI 中间件）。防三类威胁：浏览器恶意网页打本机接口、  
   DNS rebinding、容器化后裸奔局域网。留空 = 关闭（纯本机开发默认）。
-- **启用方法（三处同步）**：`agent-service/.env`、`backend/src/main/resources/application.properties`
-  的 `agent.service.token`、`frontend/vite.config.ts` 的 `X-Agent-Token`。Spring 侧改完需
+- **启用方法（三处同步）**：`agent-service/.env`、`backend/src/main/resources/application.properties`  
+  的 `agent.service.token`、`frontend/vite.config.ts` 的 `X-Agent-Token`。Spring 侧改完需  
   `mvn clean package -DskipTests` 重新打包。
 - **CORS**：旧版 `src/server.py`（休眠的 stdlib HTTP 入口）从 `*` 收紧为仅回显本机 Origin，并走同一 token 校验。
 - **异常脱敏**：Agent 内部异常只记服务端日志，客户端拿通用文案；旧版 `.env` 上传限制等回归见更新日志。
@@ -171,9 +190,10 @@ python -m pip install -r requirements-dev.txt   # pytest + httpx
 python -m pytest tests/ -q
 ```
 
-覆盖五层：文件导入解析（GPX/CSV/OCR 规则兜底）、意图管线（目标检测回归）、
-分析层（心率区间/负荷/力量趋势）、plan_store 流转与并发、HTTP 层（鉴权中间件 + 异常脱敏）。
+覆盖五层：文件导入解析（GPX/CSV/OCR 规则兜底）、意图管线（目标检测回归）、  
+分析层（心率区间/负荷/力量趋势）、plan_store 流转与并发、HTTP 层（鉴权中间件 + 异常脱敏）。  
 LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-ocr.txt`。
+
 
 ## 当前已验证（端到端全通 ✅，2026-08-19）
 
@@ -247,6 +267,24 @@ LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-
 - **Bug**：修复意图管线顺序（记忆意图先于目标检测，「我想起来了你记得吗」不再被误判成目标变更）；修复 `_rule_parse_ocr` 力量行正则不认「组×次×kg」；Spring multipart 调到 10MB（默认 1MB 挡截图）；`Map.of` null NPE；SSE 编排异常静默截断补 error 事件。
 - **质量**：新增 61 个 pytest 用例（解析/意图/分析/存储/HTTP 五层）；Java URL 与 token 移入 application.properties；新增 requirements-dev.txt / requirements-ocr.txt；面试讲法见根目录《面试要点.md》。
 
+### 2026-09-13 前端 Vue3 重构第二版：设计系统 + 组件分层 + 交互提质
+
+**设计系统（`src/styles/`）**
+- 新增 `tokens.css`：把颜色/排版/圆角/阴影/动效全部收敛成令牌。质感三件套＝**分层表面**（`--surface-0..4`，靠明度差而非边框堆叠建立层级）、**发丝内高光**（`--hairline-top`，卡片顶部 1px 内阴影）、**大范围柔和投影**（`--shadow-1/2/3`，层级越高投影越大越散）；
+- 新增 `base.css`（reset / 滚动条 / 焦点环 / 关键帧 / `prefers-reduced-motion`）与 `prose.css`（Markdown 富文本统一外观：表格做成内嵌卡片、代码块独立深底、标题带渐变锚点）；旧变量名保留兼容映射，未重构组件不破。
+
+**组件分层（`src/components/`）**
+- `ui/` 8 个基础件：AppCard（双层描边+内高光+语义色竖条）、StatTile（KPI 磁贴，右上柔光+渐变数字）、AppButton / AppPill / SectionTitle / EmptyState / SkeletonBlock / StatusDot；
+- `charts/` 自研 SVG 升级：LineChart 支持**渐变面积填充 + Catmull-Rom 平滑曲线 + 悬停十字线与提示卡 + 描边入场动画**，坐标用 ResizeObserver 取像素（不再拉伸 viewBox，描边不变形）；ZoneBar 心率区间分段条 + 占比图例；
+- `chat/` 8 个业务件：SessionList（排序/搜索/二步删除）、ChatHeader、MessageBubble（用户气泡 / 助理卡片 / 复制）、**ThinkingTrace 多 Agent 协作时间轴**（节点状态四态、进度条、失败自动展开产出）、ChatComposer（自动高度 / Enter 发送 / 粘贴截图）、ProfilePanel、PendingCommitCard（暂存确认）、DropOverlay；
+- **逻辑抽离**：`composables/useSessions`（多会话+持久化）与 `useAgentChat`（发送/编排 SSE/导入/确认/画像），Chat 视图只做编排与布局；`constants/agents.ts` 沉淀子 Agent 中文名+职责+图标+色相。
+
+**外壳与交互**
+- 侧栏改为极窄毛玻璃导轨（品牌区+图标+滑动高亮+模块专属色），模块切换走 `Transition` + `KeepAlive`（切走再回来不丢会话状态）；
+- 新增**氛围层**（模块色晕 + 遮罩网格），有壁纸时自动隐藏避免浑浊；外观面板改成右侧抽屉（预设色块 + 自定义上传预览 + 移除）。
+
+**清理**：删除被替换的 9 个旧组件（MessageList / SessionSidebar / ChatInput / Dropzone / HeaderBar / SvgLineChart / TrainingCharts / RecentSessions / UserProfileSidebar）；构建产物 165 模块，CSS 60.4 kB / JS 304.9 kB（gzip 10.9 / 122.4 kB）。
+
 ### 2026-08-20 工作台模式 + 用户画像侧栏
 
 - **工作台模式**：从单聊天页升级为多模块工作台——左侧小众线性 SVG 图标导航（对话 / 训练数据 / 记忆 / 外观），模块注册表式扩展（`AppWorkbench.vue`）；
@@ -289,6 +327,7 @@ LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-
 **实测**（华为户外跑步小结截图，1080×2414）：平均心率 149 ✓ / 平均配速 8'00" ✓ /
 运动时长 47:22 ✓ / 距离 5.92km ✓ / 日期 2026-05-31 ✓。
 
+
 ### 2026-08-13 多 Agent 体系重设：硬编码流水线 → Claude Code 式主-从分发（本次大改）
 
 **机制层**（`agent-service/src/`）
@@ -328,6 +367,7 @@ LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-
 - 长期记忆 USER.md 仍需「记住/记下」触发 + 真实 key 才落盘
 - 子 Agent 的语义质量（答非所问/数据编错）尚无自动化评测，靠主 Agent 综合阶段人工兜底
 - 意图路由准确率尚未标注评测（计划：50 条真实消息跑混淆矩阵）
+
 
 ## 接口契约
 

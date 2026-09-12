@@ -1,0 +1,161 @@
+/* ============================================================================
+   设计令牌（Design Tokens）—— 深色高级运动风
+   ----------------------------------------------------------------------------
+   所有颜色 / 间距 / 圆角 / 阴影 / 动效只在这里定义，组件一律引用 var()。
+   质感三件套：
+     1) 分层表面（surface-0..4）：靠明度差而非边框堆叠建立层级；
+     2) 发丝内高光（--hairline-top）：卡片顶部 1px 内阴影，模拟光线掠过；
+     3) 大范围柔和投影（--shadow-*）：越高的层级投影越大越散。
+
+   兼容层：文件末尾保留旧变量名（--bg / --card / --muted ...）映射到新令牌，
+   未重构的旧组件仍可正常工作。
+   ========================================================================== */
+
+:root {
+  /* ---------- 表面分层（由深到浅＝由低到高） ---------- */
+  --surface-0: #0d1015; /* 应用底色 */
+  --surface-1: #131822; /* 面板 / 侧栏 */
+  --surface-2: #19202b; /* 卡片 */
+  --surface-3: #212a37; /* 抬升 / 悬停 */
+  --surface-4: #2a3543; /* 激活 / 输入框内层 */
+  --glass: rgba(19, 24, 34, 0.72);
+  --glass-strong: rgba(13, 16, 21, 0.86);
+
+  /* ---------- 描边（一律低对比，靠明度差分层） ---------- */
+  --line: rgba(255, 255, 255, 0.07);
+  --line-2: rgba(255, 255, 255, 0.11);
+  --line-3: rgba(255, 255, 255, 0.18);
+
+  /* ---------- 文字 ---------- */
+  --ink: #eaeff7; /* 标题 / 主文本 */
+  --ink-2: #a9b4c4; /* 次要文本 */
+  --ink-3: #77839a; /* 说明 / 占位 */
+  --ink-4: #545f70; /* 极弱 / 时间戳 */
+  --ink-inv: #0d1015; /* 反色（用于亮色按钮上的文字） */
+
+  /* ---------- 品牌色（蓝→青渐变，运动科技感） ---------- */
+  --accent: #3d8bff;
+  --accent-hi: #5ea3ff;
+  --accent-2: #2ad4c8;
+  --grad-accent: linear-gradient(135deg, #3d8bff 0%, #2ad4c8 100%);
+  --grad-accent-soft: linear-gradient(135deg, rgba(61, 139, 255, 0.16) 0%, rgba(42, 212, 200, 0.12) 100%);
+
+  /* ---------- 语义色 ---------- */
+  --ok: #35d18a;
+  --warn: #f0b23c;
+  --danger: #ff5f56;
+  --energy: #ff7a45; /* 训练负荷 / PR 强调 */
+
+  /* 心率区间（Z1→Z5，与后端 zones 字段对应） */
+  --z1: #2fb56f;
+  --z2: #22b8a5;
+  --z3: #e0a63c;
+  --z4: #ff7a45;
+  --z5: #e5534b;
+
+  /* ---------- 排版刻度 ---------- */
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  --font-mono: "SFMono-Regular", "JetBrains Mono", ui-monospace, Menlo, Consolas,
+    monospace;
+
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-base: 14px;
+  --fs-md: 16px;
+  --fs-lg: 20px;
+  --fs-xl: 26px;
+  --fs-2xl: 34px;
+  --fs-3xl: 44px;
+
+  --fw-normal: 400;
+  --fw-medium: 500;
+  --fw-semi: 600;
+  --fw-bold: 700;
+
+  --lh-tight: 1.25;
+  --lh-normal: 1.55;
+  --lh-loose: 1.8;
+
+  /* ---------- 圆角 ---------- */
+  --r-xs: 6px;
+  --r-sm: 9px;
+  --r-md: 13px;
+  --r-lg: 18px;
+  --r-xl: 24px;
+  --r-full: 999px;
+
+  /* ---------- 间距刻度 ---------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 32px;
+  --sp-8: 40px;
+
+  /* ---------- 阴影 / 光效 ---------- */
+  --hairline-top: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --shadow-2: 0 10px 28px -12px rgba(0, 0, 0, 0.6);
+  --shadow-3: 0 28px 64px -24px rgba(0, 0, 0, 0.72);
+  --ring-accent: 0 0 0 1px rgba(61, 139, 255, 0.45),
+    0 10px 34px -12px rgba(61, 139, 255, 0.55);
+  --glow-ok: 0 0 0 1px rgba(53, 209, 138, 0.4);
+  --glow-danger: 0 0 0 1px rgba(255, 95, 86, 0.42);
+  --glow-warn: 0 0 0 1px rgba(240, 178, 60, 0.42);
+
+  /* ---------- 动效 ---------- */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  --t-fast: 120ms;
+  --t-base: 200ms;
+  --t-slow: 340ms;
+
+  /* ---------- 层级 ---------- */
+  --z-bg: 0;
+  --z-content: 1;
+  --z-sticky: 10;
+  --z-overlay: 40;
+  --z-modal: 60;
+  --z-toast: 80;
+
+  /* ---------- 布局尺寸 ---------- */
+  --rail-w: 92px;
+  --sidebar-w: 268px;
+  --panel-w: 300px;
+  --content-max: 940px;
+
+  /* ---------- 壁纸（由外观设置注入，无壁纸时为空） ---------- */
+  --wallpaper: none;
+}
+
+/* ============================================================================
+   兼容映射：旧组件使用的变量名 → 新令牌
+   （新代码请勿使用，重构完成后可删除本段）
+   ========================================================================== */
+:root {
+  --bg: var(--surface-0);
+  --bg-soft: var(--surface-1);
+  --card: var(--surface-2);
+  --card-hover: var(--surface-3);
+  --border: var(--line-2);
+  --border-soft: var(--line);
+  --text: var(--ink);
+  --text-soft: var(--ink-2);
+  --muted: var(--ink-3);
+  --faint: var(--ink-4);
+  --accent-soft: rgba(61, 139, 255, 0.14);
+  --danger-soft: rgba(255, 95, 86, 0.14);
+  --user-msg: #2b4a78;
+  --assistant-msg: var(--surface-2);
+  --msg-border: var(--line-2);
+  --code-bg: #0f141c;
+  --pre-bg: #0b0f16;
+  --pre-text: #d7dce3;
+  --node-bg: var(--surface-2);
+  --node-running: var(--accent);
+  --node-done: var(--ok);
+  --node-failed: var(--danger);
+}
