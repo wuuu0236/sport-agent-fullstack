@@ -1,7 +1,9 @@
 @echo off
 REM 一键启动 sport-agent-fullstack 三服务（各自独立窗口）
 REM 前提：backend\target\sport-agent-backend-0.1.0.jar 已构建（见 README 的 mvn clean package）
-set BASE=C:\Users\24162\Documents\sport-agent-fullstack
+REM 项目根目录由脚本自身位置推导（%~dp0）。%~dp0 自带结尾反斜杠，所以下面直接
+REM 拼 %BASE%子目录；整个文件夹搬到别处/多份副本共存时，双击哪份就启动哪份。
+set BASE=%~dp0
 set JAVA_HOME=C:\Users\24162\tools\jdk17\jdk-17.0.20+8
 set PY=C:\Users\24162\.workbuddy\binaries\python\versions\3.13.12\python.exe
 set NPM=C:\Users\24162\.workbuddy\binaries\node\versions\22.22.2-2\npm.cmd
@@ -14,9 +16,9 @@ set HTTPS_PROXY=
 set http_proxy=
 set https_proxy=
 
-start "agent-service(8001)" cmd /k "cd /d %BASE%\agent-service && %PY% -m uvicorn app:app --port 8001 --host 127.0.0.1"
-start "backend(8080)" cmd /k "cd /d %BASE%\backend && %JAVA_HOME%\bin\java -jar target\sport-agent-backend-0.1.0.jar --server.port=8080"
-start "frontend(5173)" cmd /k "cd /d %BASE%\frontend && %NPM% run dev"
+start "agent-service(8001)" cmd /k "cd /d %BASE%agent-service && %PY% -m uvicorn app:app --port 8001 --host 127.0.0.1"
+start "backend(8080)" cmd /k "cd /d %BASE%backend && %JAVA_HOME%\bin\java -jar target\sport-agent-backend-0.1.0.jar --server.port=8080"
+start "frontend(5173)" cmd /k "cd /d %BASE%frontend && %NPM% run dev"
 
 echo 三服务已在独立窗口启动。浏览器打开 http://localhost:5173
 echo （若 backend 窗口报找不到 jar，请先按 README 执行 mvn clean package -DskipTests）
