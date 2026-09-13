@@ -59,7 +59,7 @@
 
 | 层         | 技术                                                                          |
 | --------- | --------------------------------------------------------------------------- |
-| 前端        | Vue 3 + Vite（设计令牌体系 + 4 模块工作台 + 自研 SVG 图表 + SSE EventSource；多 Agent 协作走内联时间轴） |
+| 前端        | Vue 3 + Vite（设计令牌体系 · **深/浅双主题** + 4 模块工作台 + 自研 SVG 图表 + SSE EventSource；多 Agent 协作走内联时间轴） |
 | 网关        | Spring Boot 3（薄转发：/api/chat、/api/import-image、/api/orchestrate、/api/commit） |
 | Agent 能力层 | Python + FastAPI 微服务：SupervisorAgent 主循环 + 10 个专业子 Agent                    |
 | 记忆        | 双存储 USER.md / MEMORY.md（冻结快照注入）+ Skill 三级渐进加载 + session 短期记忆                |
@@ -101,12 +101,13 @@ sport-agent-fullstack/
 ├── frontend/           # Vue 3 + Vite（设计令牌 + 组件分层）
 │   ├── package.json / vite.config.ts
 │   └── src/
-│       ├── styles/          # tokens.css（设计令牌）/ base.css（reset+动效）/ prose.css（Markdown 排版）
+│       ├── styles/          # tokens.css（设计令牌，含深/浅双主题）/ base.css（reset+动效）/ prose.css（Markdown 排版）
+│       ├── utils/wallpaper.ts      # 壁纸预设（灰白系 4 + 深色系 4）+ 明暗偏好持久化
 │       ├── components/
 │       │   ├── ui/          # AppCard / StatTile / AppButton / AppPill / SectionTitle / EmptyState / SkeletonBlock / StatusDot
 │       │   ├── charts/      # LineChart（渐变面积+平滑曲线+悬停提示）/ ZoneBar（心率区间）
 │       │   ├── chat/        # SessionList / ChatHeader / MessageBubble / ThinkingTrace（多 Agent 时间轴）/ ChatComposer / ProfilePanel / PendingCommitCard / DropOverlay
-│       │   └── ThemeSettings.vue   # 外观抽屉：预设色块 + 自定义壁纸
+│       │   └── ThemeSettings.vue   # 外观抽屉：界面明暗 + 灰白/深色壁纸分组 + 自定义上传
 │       ├── composables/     # useSessions（多会话持久化）/ useAgentChat（发送/编排/导入/确认/画像）
 │       ├── constants/agents.ts     # 子 Agent 中文名 + 职责 + 图标 + 色相
 │       ├── views/           # Chat / DashboardView / PlanView / MemoryView
@@ -182,7 +183,7 @@ start-all.bat
 - **CORS**：旧版 `src/server.py`（休眠的 stdlib HTTP 入口）从 `*` 收紧为仅回显本机 Origin，并走同一 token 校验。
 - **异常脱敏**：Agent 内部异常只记服务端日志，客户端拿通用文案；旧版 `.env` 上传限制等回归见更新日志。
 
-## 测试（74 个用例，`pytest tests/` 全绿）
+## 测试（90 个用例，`pytest tests/` 全绿）
 
 ```bash
 cd agent-service
@@ -229,6 +230,19 @@ LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-
   跨会话常驻并注入各 Agent 的 system prompt（真实 LLM 模式下自动解析落地；mock 模式仅提示、不写盘）。
 
 ## 更新日志（迭代脉络）
+
+### 2026-09-13 晚 灰白（浅色）主题 + 字号整体上调一档
+- **浅色主题**（`093a870`）：`tokens.css` 新增 `:root[data-theme='light']` 整套令牌——层级逻辑由「越亮越高」翻转成「越白越高」（`surface-0` 最灰 → `surface-2` 纯白卡片），描边/内高光/投影/毛玻璃全部换成适配浅底的极淡灰晕，语义色与心率区间统一压深一档保白底对比度；兼容层里几个指向深色硬编码值的旧变量（`code-bg` / `pre-bg` / `pre-text` / `user-msg`）同步覆盖；
+- **灰白壁纸四款**：云白 / 雾灰 / 米白 / 石墨。预设带 `theme` 字段，选浅色壁纸自动切换浅色令牌（否则白底叠深色面板会发脏），也可在外观抽屉里手动覆盖；自定义图片默认深色并给出提示；
+- **字号整体 +2px**（正文 14→16、次要 13→15、辅助 12→14），新增 `--fs-2xs: 13px` 收编原先散落的 10 / 10.5 / 11 / 11.5px 硬编码微字号——22 处全部改为引用令牌，组件里不再有写死的字号；
+- **外观抽屉**：新增「界面明暗」分段控件，背景按「灰白系 / 深色系」分组；`index.html` 首屏底色按已存偏好上色，避免加载瞬间闪成反色；
+- **功能完整性核对**：13 个后端能力逐个确认仍有前端入口；被替换掉的旧组件（HeaderBar / MessageList / TrainingCharts / SessionSidebar / UserProfileSidebar）逐一比对，能力只增不减；
+- 构建 166 模块，CSS 64.2 kB / JS 307.9 kB（gzip 11.7 / 123.5 kB）。
+
+### 2026-09-13 计划写入点加质量门（修脏计划）
+- **问题**：计划模块出现一份内容是「主 Agent 综合未生成，以下为各子 Agent 的实际产出汇总：」的脏计划——降级文本一路被当成正常回答，最后由 `plan_store.set_pending` 直接落库；今天仍可达的同类入口还有 `_coach_answer` 用 try/except 吞掉异常后返回「教练生成建议时出错：…」；
+- **修法**（`0f7d582`）：新增 `_PLAN_DEGRADED_MARKERS`，`_stage_plan` 作为唯一写入点先校验再落库（空内容或命中降级标记一律拒收）；`_coach_answer` 改为失败即抛异常，由调用方决定降级话术；三处调用点同步改造（chat 计划分支 / `/plan/generate` 失败回 503 不落库 / `_handle_goal_change`）；
+- 新增 `tests/test_plan_guard.py` 16 条用例；pytest 74 → **90 passed**。
 
 ### 2026-09-07 晚 技能链路修复（蒸馏接线 / 编排注入 / 触发词去重 / 主理门控）
 - **「存技能 / patch 技能」接线到线上入口**（`cda660d`）：元动作拦截原先只留在旧入口 server.py，全栈化后 app.py 未接，主路径下技能蒸馏等于死功能；
