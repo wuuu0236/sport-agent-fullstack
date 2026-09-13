@@ -299,7 +299,7 @@ function statusText(s: ThinkingStep['status']) {
 }
 .name {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
   background: var(--surface-4);
   padding: 1px 6px;
@@ -307,7 +307,7 @@ function statusText(s: ThinkingStep['status']) {
   border: 1px solid var(--line);
 }
 .state {
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 .step.running .state {
@@ -322,7 +322,7 @@ function statusText(s: ThinkingStep['status']) {
 
 .toggle {
   margin-left: auto;
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   color: var(--ink-3);
   padding: 3px 8px;
   border-radius: var(--r-full);
@@ -348,7 +348,7 @@ function statusText(s: ThinkingStep['status']) {
   border-radius: var(--r-sm);
   background: var(--pre-bg);
   border: 1px solid var(--line);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   line-height: 1.65;
   color: var(--ink-2);
   white-space: pre-wrap;

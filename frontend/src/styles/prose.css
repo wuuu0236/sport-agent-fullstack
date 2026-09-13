@@ -111,7 +111,7 @@
   border-radius: var(--r-full);
   background: rgba(61, 139, 255, 0.16);
   color: var(--accent-hi);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   font-weight: var(--fw-bold);
   line-height: 15px;
   text-align: center;
@@ -145,7 +145,7 @@
   vertical-align: top;
 }
 .prose tbody tr:nth-child(even) td {
-  background: rgba(255, 255, 255, 0.014);
+  background: var(--row-alt);
 }
 .prose tbody tr:hover td {
   background: rgba(61, 139, 255, 0.05);
@@ -161,7 +161,7 @@
   padding: 2px 6px;
   border-radius: var(--r-xs);
   background: var(--surface-4);
-  color: #cfe4ff;
+  color: var(--code-ink);
   border: 1px solid var(--line);
 }
 .prose pre {

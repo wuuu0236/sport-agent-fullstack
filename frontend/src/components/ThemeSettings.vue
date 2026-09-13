@@ -13,20 +13,58 @@
         </header>
 
         <div class="body">
-          <!-- 背景选择 -->
+          <!-- 界面明暗 -->
+          <section class="group">
+            <h3 class="gt">界面明暗</h3>
+            <div class="seg">
+              <button
+                class="seg-btn"
+                :class="{ on: theme === 'light' }"
+                @click="emit('setTheme', 'light')"
+              >
+                <span class="seg-ico" v-html="SUN_ICON" />
+                浅色
+              </button>
+              <button
+                class="seg-btn"
+                :class="{ on: theme === 'dark' }"
+                @click="emit('setTheme', 'dark')"
+              >
+                <span class="seg-ico" v-html="MOON_ICON" />
+                深色
+              </button>
+            </div>
+            <p class="hint">选「灰白系」背景会自动切到浅色，也可在这里手动覆盖。</p>
+          </section>
+
+          <!-- 背景选择：按明暗分组，默认项单独一行 -->
           <section class="group">
             <h3 class="gt">背景</h3>
             <div class="tiles">
-              <button
-                class="tile"
-                :class="{ on: !wallpaper }"
-                @click="setWallpaper(null)"
-              >
+              <button class="tile" :class="{ on: !wallpaper }" @click="setWallpaper(null)">
                 <span class="swatch tile-default" />
                 <span class="tn">默认</span>
               </button>
+            </div>
+
+            <h4 class="gsub">灰白系 <i>白天 / 强光下更省眼</i></h4>
+            <div class="tiles">
               <button
-                v-for="p in WALLPAPER_PRESETS"
+                v-for="p in LIGHT_PRESETS"
+                :key="p.id"
+                class="tile"
+                :class="{ on: wallpaper === presetToStored(p) }"
+                @click="setWallpaper(presetToStored(p))"
+              >
+                <span class="swatch" :style="{ background: p.css }" />
+                <span class="tn">{{ p.name }}</span>
+              </button>
+            </div>
+
+            <h4 class="gsub">深色系 <i>夜间 / 暗环境</i></h4>
+            <div class="tiles">
+              <button
+                v-for="p in DARK_PRESETS"
                 :key="p.id"
                 class="tile"
                 :class="{ on: wallpaper === presetToStored(p) }"
@@ -61,6 +99,7 @@
 
           <p class="tip">
             壁纸只写入浏览器 localStorage，不上传服务器；启用壁纸后氛围光自动隐藏，避免背景浑浊。
+            自定义图片无法自动判断明暗，默认按深色渲染，可在上方手动切换。
           </p>
         </div>
       </aside>
@@ -70,13 +109,14 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { WALLPAPER_PRESETS, presetToStored } from '../utils/wallpaper'
+import { DARK_PRESETS, LIGHT_PRESETS, presetToStored, type ThemeMode } from '../utils/wallpaper'
 import { fileToCompressedDataUrl } from '../utils/image'
 
-const props = defineProps<{ open: boolean; wallpaper: string | null }>()
+const props = defineProps<{ open: boolean; wallpaper: string | null; theme: ThemeMode }>()
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'setWallpaper', stored: string | null): void
+  (e: 'setTheme', theme: ThemeMode): void
 }>()
 
 const STROKE =
@@ -84,6 +124,10 @@ const STROKE =
 const CLOSE_ICON = `<svg viewBox="0 0 24 24" ${STROKE}><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>`
 const UPLOAD_ICON =
   `<svg viewBox="0 0 24 24" ${STROKE}><path d="M12 16.5V4.6M7.8 8.8 12 4.5l4.2 4.3"/><path d="M4.5 15.4v2.6a1.9 1.9 0 0 0 1.9 1.9h11.2a1.9 1.9 0 0 0 1.9-1.9v-2.6"/></svg>`
+const SUN_ICON =
+  `<svg viewBox="0 0 24 24" ${STROKE}><circle cx="12" cy="12" r="4.1"/><path d="M12 2.6v2.3M12 19.1v2.3M4.4 4.4l1.6 1.6M18 18l1.6 1.6M2.6 12h2.3M19.1 12h2.3M4.4 19.6 6 18M18 6l1.6-1.6"/></svg>`
+const MOON_ICON =
+  `<svg viewBox="0 0 24 24" ${STROKE}><path d="M20.4 14.2A8.6 8.6 0 0 1 9.8 3.6a8.7 8.7 0 1 0 10.6 10.6z"/></svg>`
 
 const err = ref('')
 
@@ -122,7 +166,7 @@ async function onUpload(e: Event) {
   z-index: var(--z-modal);
   display: flex;
   justify-content: flex-end;
-  background: rgba(6, 9, 13, 0.5);
+  background: var(--veil);
   backdrop-filter: blur(3px);
 }
 
@@ -204,6 +248,76 @@ async function onUpload(e: Event) {
   letter-spacing: 0.02em;
 }
 
+/* ---------- 明暗二选一：分段控件 ---------- */
+.seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  border-radius: var(--r-md);
+  background: var(--surface-4);
+  border: 1px solid var(--line);
+}
+.seg-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 9px 8px;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--ink-3);
+  transition: color var(--t-base) var(--ease-out), background var(--t-base) var(--ease-out),
+    box-shadow var(--t-base) var(--ease-out);
+}
+.seg-btn:hover {
+  color: var(--ink);
+}
+.seg-btn.on {
+  color: var(--accent);
+  background: var(--surface-2);
+  font-weight: var(--fw-semi);
+  box-shadow: var(--hairline-top), var(--shadow-1);
+}
+.seg-ico {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  flex: none;
+}
+.seg-ico :deep(svg) {
+  width: 100%;
+  height: 100%;
+}
+.hint {
+  margin-top: 9px;
+  font-size: var(--fs-2xs);
+  color: var(--ink-4);
+  line-height: var(--lh-normal);
+}
+
+/* ---------- 背景分组小标题 ---------- */
+.gsub {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: var(--sp-4) 0 var(--sp-3);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semi);
+  color: var(--ink-3);
+  letter-spacing: 0.04em;
+}
+.gsub:first-of-type {
+  margin-top: 0;
+}
+.gsub i {
+  font-style: normal;
+  font-weight: var(--fw-normal);
+  color: var(--ink-4);
+  letter-spacing: 0;
+}
+
 .tiles {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -235,8 +349,16 @@ async function onUpload(e: Event) {
   border: 1px solid var(--line);
 }
 .tile-default {
-  background: radial-gradient(circle at 30% 20%, rgba(61, 139, 255, 0.32), transparent 60%),
-    radial-gradient(circle at 80% 90%, rgba(42, 212, 200, 0.2), transparent 62%),
+  background: radial-gradient(
+      circle at 30% 20%,
+      color-mix(in srgb, var(--accent) 30%, transparent),
+      transparent 60%
+    ),
+    radial-gradient(
+      circle at 80% 90%,
+      color-mix(in srgb, var(--accent-2) 22%, transparent),
+      transparent 62%
+    ),
     var(--surface-0);
 }
 .tn {

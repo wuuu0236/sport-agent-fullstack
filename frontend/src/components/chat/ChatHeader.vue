@@ -47,7 +47,7 @@ const COACH_ICON =
   display: grid;
   place-items: center;
   border-radius: var(--r-md);
-  color: #ffb08a;
+  color: var(--coach-ink);
   background: linear-gradient(180deg, rgba(255, 122, 69, 0.18), rgba(255, 122, 69, 0.08));
   border: 1px solid rgba(255, 122, 69, 0.3);
   box-shadow: var(--hairline-top);

@@ -77,7 +77,8 @@ select {
 /* 焦点环：键盘可达性 + 视觉统一（鼠标点击不显示） */
 :focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--surface-0), 0 0 0 4px rgba(61, 139, 255, 0.55);
+  box-shadow: 0 0 0 2px var(--surface-0),
+    0 0 0 4px color-mix(in srgb, var(--accent) 58%, transparent);
   border-radius: var(--r-sm);
 }
 
@@ -108,8 +109,8 @@ select {
 }
 
 ::selection {
-  background: rgba(61, 139, 255, 0.32);
-  color: #fff;
+  background: var(--sel-bg);
+  color: var(--sel-ink);
 }
 
 /* ============================================================================

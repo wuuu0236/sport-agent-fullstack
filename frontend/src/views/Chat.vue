@@ -242,7 +242,7 @@ onMounted(() => {
   display: grid;
   place-items: center;
   border-radius: var(--r-xl);
-  color: #ffb08a;
+  color: var(--coach-ink);
   background: linear-gradient(180deg, rgba(255, 122, 69, 0.2), rgba(255, 122, 69, 0.07));
   border: 1px solid rgba(255, 122, 69, 0.32);
   box-shadow: var(--hairline-top), var(--shadow-2);
@@ -339,7 +339,7 @@ onMounted(() => {
 .foot-hint {
   margin-top: 9px;
   text-align: center;
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 </style>

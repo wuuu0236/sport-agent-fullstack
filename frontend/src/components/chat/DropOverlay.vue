@@ -24,7 +24,7 @@ const IMAGE_ICON =
   z-index: var(--z-overlay);
   display: grid;
   place-items: center;
-  background: rgba(9, 13, 19, 0.72);
+  background: var(--veil-strong);
   backdrop-filter: blur(6px);
 }
 .box {

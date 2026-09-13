@@ -191,7 +191,7 @@ function onPaste(e: ClipboardEvent) {
 }
 
 .hint {
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
   white-space: nowrap;
   overflow: hidden;
@@ -199,7 +199,7 @@ function onPaste(e: ClipboardEvent) {
 }
 kbd {
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   padding: 1px 4px;
   border-radius: var(--r-xs);
   background: var(--surface-4);

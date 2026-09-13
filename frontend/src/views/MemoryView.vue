@@ -14,7 +14,7 @@
             <AppPill tone="accent" size="sm">{{ data.user.length }} 条</AppPill>
           </template>
           <div class="col-head">
-            <span class="col-ico" :style="{ '--h': '#3d8bff' }" v-html="USER_ICON" />
+            <span class="col-ico" :style="{ '--h': 'var(--accent)' }" v-html="USER_ICON" />
             <div>
               <h3 class="col-title">关于你</h3>
               <p class="col-sub">身份 / 偏好 / 身体基线 · <code>USER.md</code></p>
@@ -38,7 +38,7 @@
             <AppPill tone="energy" size="sm">{{ data.memory.length }} 条</AppPill>
           </template>
           <div class="col-head">
-            <span class="col-ico" :style="{ '--h': '#f0b23c' }" v-html="NOTE_ICON" />
+            <span class="col-ico" :style="{ '--h': 'var(--warn)' }" v-html="NOTE_ICON" />
             <div>
               <h3 class="col-title">助理笔记</h3>
               <p class="col-sub">陪练经验与约定 · <code>MEMORY.md</code></p>
@@ -63,7 +63,7 @@
           </AppButton>
         </template>
         <div class="col-head">
-          <span class="col-ico" :style="{ '--h': '#2ad4c8' }" v-html="SNAP_ICON" />
+          <span class="col-ico" :style="{ '--h': 'var(--accent-2)' }" v-html="SNAP_ICON" />
           <div>
             <h3 class="col-title">注入快照</h3>
             <p class="col-sub">各子 Agent 上下文里实际看到的记忆内容</p>
@@ -190,7 +190,7 @@ onMounted(load)
 }
 .col-sub code {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-2xs);
   padding: 1px 4px;
   border-radius: var(--r-xs);
   background: var(--surface-4);
@@ -216,7 +216,7 @@ onMounted(load)
   border-color: var(--line-3);
 }
 .idx {
-  font-size: 10.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
   padding-top: 2px;
   flex: none;

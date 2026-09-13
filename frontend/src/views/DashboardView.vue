@@ -51,7 +51,7 @@
             title="跑量趋势"
             :subtitle="runs.length >= 2 ? `最近 ${distPoints.length} 次跑步 · 公里` : '数据不足'"
           >
-            <LineChart v-if="distPoints.length >= 2" :points="distPoints" color="#2ad4c8" unit=" km" />
+            <LineChart v-if="distPoints.length >= 2" :points="distPoints" color="var(--accent-2)" unit=" km" />
             <p v-else class="nodata">至少 2 次跑步记录才能画出趋势</p>
           </AppCard>
 
@@ -59,7 +59,7 @@
             title="配速趋势"
             :subtitle="pacePoints.length >= 2 ? `分/公里 · 越低越快` : '数据不足'"
           >
-            <LineChart v-if="pacePoints.length >= 2" :points="pacePoints" color="#3d8bff" unit=" 分/km" />
+            <LineChart v-if="pacePoints.length >= 2" :points="pacePoints" color="var(--accent)" unit=" 分/km" />
             <p v-else class="nodata">至少 2 次跑步记录才能画出趋势</p>
           </AppCard>
 
@@ -67,7 +67,7 @@
             title="训练负荷 TRIMP"
             :subtitle="loadPoints.length >= 2 ? '时长 × 强度，衡量单次训练压力' : '数据不足'"
           >
-            <LineChart v-if="loadPoints.length >= 2" :points="loadPoints" color="#ff7a45" />
+            <LineChart v-if="loadPoints.length >= 2" :points="loadPoints" color="var(--energy)" />
             <p v-else class="nodata">需要带心率的跑步记录才能计算负荷</p>
           </AppCard>
 

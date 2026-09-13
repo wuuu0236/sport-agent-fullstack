@@ -304,7 +304,7 @@ watch(
 .axis-y,
 .axis-x {
   fill: var(--ink-4);
-  font-size: 10.5px;
+  font-size: var(--fs-2xs);
   font-family: var(--font-sans);
 }
 .axis-y {
@@ -344,7 +344,7 @@ watch(
   animation: pop-in var(--t-fast) var(--ease-out) both;
 }
 .tip-label {
-  font-size: 10.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 .tip-val {
@@ -361,7 +361,7 @@ watch(
   margin-left: 2px;
 }
 .tip-sub {
-  font-size: 10.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-3);
 }
 </style>

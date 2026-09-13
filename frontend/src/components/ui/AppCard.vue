@@ -49,7 +49,7 @@ withDefaults(
   background: linear-gradient(
     90deg,
     transparent,
-    rgba(255, 255, 255, 0.16),
+    var(--sheen),
     transparent
   );
   pointer-events: none;
@@ -152,6 +152,6 @@ withDefaults(
 .foot {
   padding: var(--sp-3) var(--sp-5);
   border-top: 1px solid var(--line);
-  background: rgba(0, 0, 0, 0.16);
+  background: var(--foot-bg);
 }
 </style>

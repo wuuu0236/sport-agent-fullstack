@@ -136,7 +136,7 @@ async function copy() {
 }
 .tag {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
   background: var(--surface-4);
   padding: 1px 6px;
@@ -146,7 +146,7 @@ async function copy() {
 .copy {
   margin-left: auto;
   flex: none;
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
   padding: 3px 9px;
   border-radius: var(--r-full);

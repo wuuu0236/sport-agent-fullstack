@@ -75,12 +75,12 @@ function reload() {
 }
 .p-sub {
   margin-top: 3px;
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 .p-sub code {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   padding: 1px 4px;
   border-radius: var(--r-xs);
   background: var(--surface-4);
@@ -181,7 +181,7 @@ function reload() {
   gap: 7px;
   padding: var(--sp-3) var(--sp-4);
   border-top: 1px solid var(--line);
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 .lock {

@@ -165,7 +165,7 @@ function rel(ts: number): string {
   color: var(--ink-4);
 }
 .s-clear {
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 .s-clear:hover {
@@ -228,7 +228,7 @@ function rel(ts: number): string {
   font-weight: var(--fw-semi);
 }
 .i-meta {
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
   display: flex;
   align-items: center;

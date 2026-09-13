@@ -103,7 +103,7 @@ function fmt(v: number) {
   filter: brightness(1.12);
 }
 .seg-txt {
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   font-weight: var(--fw-semi);
   color: rgba(6, 18, 31, 0.78);
 }

@@ -46,8 +46,10 @@
     <ThemeSettings
       :open="showSettings"
       :wallpaper="wallpaper"
+      :theme="theme"
       @close="showSettings = false"
       @setWallpaper="applyWallpaper"
+      @setTheme="applyTheme"
     />
   </div>
 </template>
@@ -59,7 +61,7 @@ import DashboardView from './views/DashboardView.vue'
 import MemoryView from './views/MemoryView.vue'
 import PlanView from './views/PlanView.vue'
 import ThemeSettings from './components/ThemeSettings.vue'
-import { loadWallpaper, saveWallpaper, resolveWallpaperBackground } from './utils/wallpaper'
+import { loadWallpaper, loadTheme, saveTheme, saveWallpaper, resolveWallpaperBackground, themeOfWallpaper, applyThemeToDocument, type ThemeMode } from './utils/wallpaper'
 
 const STROKE =
   'fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"'
@@ -111,9 +113,22 @@ onBeforeUnmount(() => window.removeEventListener('hashchange', onHashChange))
 const wallpaper = ref<string | null>(loadWallpaper())
 const wallpaperStyle = computed(() => resolveWallpaperBackground(wallpaper.value))
 const showSettings = ref(false)
+
+// 界面明暗：显式保存过就听保存值，否则跟随壁纸自带倾向（首次进入 / 换壁纸）
+const theme = ref<ThemeMode>(loadTheme() ?? themeOfWallpaper(wallpaper.value))
+applyThemeToDocument(theme.value)
+
+function applyTheme(t: ThemeMode) {
+  theme.value = t
+  saveTheme(t)
+  applyThemeToDocument(t)
+}
+
 function applyWallpaper(stored: string | null) {
   wallpaper.value = stored
   saveWallpaper(stored)
+  // 浅色壁纸必须配浅色令牌，否则白底上叠深色面板会「脏」；选壁纸即自动切明暗
+  applyTheme(themeOfWallpaper(stored))
 }
 </script>
 
@@ -140,7 +155,7 @@ function applyWallpaper(stored: string | null) {
   position: absolute;
   border-radius: 50%;
   filter: blur(90px);
-  opacity: 0.5;
+  opacity: var(--ambient-opacity);
   transition: background var(--t-slow) var(--ease-out);
 }
 .b1 {
@@ -160,8 +175,8 @@ function applyWallpaper(stored: string | null) {
 .grid-lines {
   position: absolute;
   inset: 0;
-  background-image: linear-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+  background-image: linear-gradient(var(--grid-ink) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-ink) 1px, transparent 1px);
   background-size: 38px 38px;
   mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, #000 30%, transparent 100%);
   -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, #000 30%, transparent 100%);
@@ -209,7 +224,7 @@ function applyWallpaper(stored: string | null) {
   height: 21px;
 }
 .brand-name {
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   font-weight: var(--fw-semi);
   letter-spacing: 0.14em;
   color: var(--ink-3);
@@ -271,7 +286,7 @@ function applyWallpaper(stored: string | null) {
   height: 100%;
 }
 .nav-txt {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
   letter-spacing: 0.02em;
 }

@@ -464,7 +464,7 @@ onMounted(load)
   font-weight: var(--fw-bold);
   letter-spacing: -0.025em;
   line-height: 1.12;
-  background: linear-gradient(180deg, #ffffff, #b9c6d8);
+  background: var(--hero-ink-grad);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -547,7 +547,7 @@ onMounted(load)
 }
 .today-tag {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   font-weight: var(--fw-semi);
   color: #06121f;
   background: var(--grad-accent);
@@ -583,7 +583,7 @@ onMounted(load)
 .day-focus {
   margin-top: auto;
   align-self: flex-start;
-  font-size: 10.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-3);
   padding: 2px 8px;
   border-radius: var(--r-full);
