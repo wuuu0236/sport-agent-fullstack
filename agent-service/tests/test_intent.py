@@ -1,10 +1,16 @@
-"""意图管线回归测试：目标检测 / 编排升级判定。
+"""意图管线回归测试：目标检测 / 编排升级判定 / coach 意图分流。
 
 重点覆盖「记忆意图 vs 目标变更」的优先级 bug：
 「我想起来了，你记得吗」曾被 _detect_goal 的「我想」正则截走，
 误当成目标变更并触发计划生成（2026-09 修复 + 本文件回归锁定）。
+
+另覆盖 coach 的 _classify（2026-09-13 补）：此前只测了编排判定，
+coach 内部意图分流零覆盖，「要点/技巧/怎么做」类问法静默答非所问。
 """
 from app import _detect_goal, _needs_orchestration
+from src.agents.coach_agent import CoachAgent
+
+_coach = CoachAgent()
 
 
 class TestDetectGoal:
@@ -66,3 +72,48 @@ class TestNeedsOrchestration:
     def test_talking_about_report_stays_single(self):
         # 「谈论周报」≠「要生成周报」：问答类不编排
         assert _needs_orchestration("周报一般包含什么内容") is False
+
+
+class TestCoachClassify:
+    """coach 单 Agent 的意图分流回归。
+
+    回归背景：_classify 末尾的兜底是「消息 ≤12 字 + 能抠出一个动作名 →
+    力量趋势分析」，而「要点 / 技巧 / 怎么做」这组技术问法此前不在任何
+    白名单里，于是掉进兜底去查渐进超负荷，答非所问：
+
+        「总结一下卧推要点」→ 抠出动作名「总结」→「『总结』还没记录过训练数据」
+
+    对照组很说明问题：「总结一下卧推的发力要点」因为带了「发力」（属于下方
+    training-advice 白名单）而侥幸走对，说明漏的是这组技术问法词本身。
+    """
+
+    def test_technique_questions_go_to_chat(self):
+        # 问动作要领 / 技巧 / 怎么做的，必须走对话直答，不能被当成查数据
+        for msg in (
+            "总结一下卧推要点",
+            "卧推要点",
+            "深蹲技巧",
+            "引体向上怎么做",
+            "深蹲怎么做才标准",
+            "卧推的发力要点",
+            "硬拉的注意事项",
+        ):
+            assert _coach._classify(msg) == "chat", f"「{msg}」被误判为查数据"
+
+    def test_real_analysis_intent_still_analyses(self):
+        # 反向锁定：真要看渐进超负荷趋势的仍走力量分析，别被上面那组顺手改坏
+        for msg in (
+            "深蹲有进步吗",
+            "卧推怎么样",
+            "硬拉容量趋势",
+            "卧推数据分析",
+        ):
+            assert _coach._classify(msg) == "analyze_strength", f"「{msg}」丢了分析路径"
+
+    def test_run_data_analysis_unchanged(self):
+        # 跑步数据分析路径不受影响
+        assert _coach._classify("分析我最近的跑步心率") == "analyze_run"
+
+    def test_pain_still_goes_to_chat(self):
+        # 伤痛红线：仍走对话（不能被任何新白名单截去别处）
+        assert _coach._classify("我膝盖疼还能跑吗") == "chat"
