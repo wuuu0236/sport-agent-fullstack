@@ -212,7 +212,10 @@ class SupervisorAgent:
             self.used_skills[s["name"]] += 1
         out = agent.handle(
             inp,
-            {"skills": step_skills, "use_history": False, "recall_mode": "recall"},
+            # task 一并传下去：子 Agent 拿到的 inp 已被 @s1/@s2 填充过，
+            # planner 需要原始用户任务才能判断该产出「周报」还是「计划」。
+            {"skills": step_skills, "use_history": False, "recall_mode": "recall",
+             "task": task},
         )
         if not (out or "").strip():
             raise ValueError(f"{name} 返回空输出")
@@ -251,7 +254,11 @@ class SupervisorAgent:
         try:
             rewrite = get_agent("planner").handle(
                 f"请根据评审意见重写以下内容，修正所有问题：\n\n【评审意见】\n{review}\n\n【待重写内容】\n{last_out}",
-                {"skills": [], "use_history": False, "recall_mode": "recall"})
+                # task 必须一起传：否则重写提示词里的产出类型会退回按「重写指令」
+                # 判断（那段文本里没有「周报」字样），周报会被重写成训练计划——
+                # 评审就算正确指出「用户要的是周报不是计划」也救不回来。
+                {"skills": [], "use_history": False, "recall_mode": "recall",
+                 "task": task})
             if (rewrite or "").strip() and "（模型本次未生成内容）" not in (rewrite or ""):
                 results[last_step["id"]] = {"agent": "planner", "output": rewrite}
                 emit({"type": "agent_done", "agent": "planner", "step": n, "total": n,
