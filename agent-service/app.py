@@ -150,13 +150,19 @@ def chat(req: ChatReq):
         try:
             task = f"请帮我生成一份{goal}训练计划"
             plan_text = _coach_answer(task)
-            plan = {"name": goal, "goal": goal, "content": plan_text}
-            plan_store.set_pending(plan)
-            out = (
-                f"📋 已生成「{goal}」训练计划。\n\n"
-                "回复「替换当前计划」即可用新计划覆盖左侧「计划」模块；"
-                "回复「加入第二方案」则保留旧计划，把它作为可选方案加入。"
-            )
+            # 质量门：没真正生成出计划就不要落库，如实告知重试
+            if not _stage_plan(goal, plan_text):
+                out = (
+                    f"⚠️ 「{goal}」计划这次没生成成功（模型未返回可用内容），"
+                    "所以**没有**写入计划模块。你可以说「帮我生成"
+                    f"{goal}计划」再试一次。"
+                )
+            else:
+                out = (
+                    f"📋 已生成「{goal}」训练计划。\n\n"
+                    "回复「替换当前计划」即可用新计划覆盖左侧「计划」模块；"
+                    "回复「加入第二方案」则保留旧计划，把它作为可选方案加入。"
+                )
         except Exception as e:
             out = f"生成计划时出错：{e}。你可以换个说法再试。"
         memory.append_session("assistant", out)
@@ -299,15 +305,18 @@ def apply_plan(req: dict = None):
 
 @app.post("/plan/generate")
 def generate_plan(req: dict = None):
-    """根据目标生成计划并设为待确认。"""
+    """根据目标生成计划并设为待确认。生成失败/内容不可用时返回 503，不落库。"""
     goal = (req or {}).get("goal", "")
     if not goal:
         raise HTTPException(status_code=400, detail="goal is required")
     task = f"请帮我生成一份{goal}训练计划"
-    plan_text = _coach_answer(task)
-    plan = {"name": goal, "goal": goal, "content": plan_text}
-    plan_store.set_pending(plan)
-    return {"ok": True, "pending": plan}
+    try:
+        plan_text = _coach_answer(task)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"生成计划失败：{e}")
+    if not _stage_plan(goal, plan_text):
+        raise HTTPException(status_code=503, detail="模型本次未返回可用计划内容，请重试")
+    return {"ok": True, "pending": plan_store.list_plans().get("pending")}
 
 
 @app.post("/plan/switch")
@@ -493,13 +502,39 @@ def _coach_answer(msg: str) -> str:
 
     健身域统一出口：跑步/减脂/增肌/练部位/伤痛/计划都先走这里，
     保证用户始终从蒸馏到的谭成义视角得到回答，而非被多 Agent 拆成通用内容。
+
+    失败时**抛出异常**，由调用方决定降级话术：绝不把「教练生成建议时出错：…」
+    当成正常回答返回——调用方会把返回文本当计划内容暂存，错误信息就变成了一份
+    「计划」（历史事故：编排综合降级文本被存成「练胸」计划）。
     """
     agent = get_agent("coach")
     skills = match_skills_for(msg, "coach")
-    try:
-        return agent.handle(msg, {"skills": skills})
-    except Exception as e:
-        return f"教练生成建议时出错：{e}"
+    return agent.handle(msg, {"skills": skills})
+
+
+# 降级/错误文本标记：命中即是「这次没真正生成出计划」，
+# 来源分别对应 编排综合降级 / coach 报错 / 空回复兜底 / LLM 不可用。
+_PLAN_DEGRADED_MARKERS = (
+    "主 Agent 综合未生成",
+    "教练生成建议时出错",
+    "生成计划时出错",
+    "模型本次未生成内容",
+    "LLM 暂时不可用",
+)
+
+
+def _stage_plan(goal: str, content: str) -> bool:
+    """把生成结果暂存为待确认计划；内容为空或明显是降级/错误文本时拒绝入库。
+
+    返回是否暂存成功。写入点做质量门而不是靠上游自觉：宁可让用户看到
+    「生成失败，请重试」，也不要让一段错误文本变成正式计划——脏计划会静默
+    污染计划模块，且从界面上看不出异常（截断、Raw 产出汇总都会原样展示）。
+    """
+    text = (content or "").strip()
+    if not text or any(m in text for m in _PLAN_DEGRADED_MARKERS):
+        return False
+    plan_store.set_pending({"name": goal, "goal": goal, "content": text})
+    return True
 
 
 def _detect_goal(msg: str):
@@ -563,9 +598,14 @@ def _handle_goal_change(msg: str, goal: str) -> dict:
     try:
         # 目标变更也视为健身咨询：交给 coach（谭成义）直答，不再多 Agent 编排
         out = _coach_answer(msg)
-        # 教练给出的方案也写入「计划」模块待确认，保持模块联动
-        plan_store.set_pending({"name": goal, "goal": goal, "content": out})
-        out = _append_plan_prompt(out, goal, goal)
+        # 教练给出的方案写入「计划」模块待确认；降级/错误文本不入库
+        if _stage_plan(goal, out):
+            out = _append_plan_prompt(out, goal, goal)
+        else:
+            out = (
+                out + "\n\n⚠️ 这次的回复没能整理成计划，**未写入**计划模块；"
+                f"可以回复「帮我生成{goal}计划」重试。"
+            )
         if prev and prev != goal:
             out = (
                 f"📝 已将原目标「{prev}」保留到历史画像，当前目标更新为「{goal}」。\n\n"
