@@ -28,7 +28,7 @@
         </button>
       </div>
 
-      <button class="nav-btn ghost" title="外观设置" @click="showSettings = true">
+      <button class="rail-foot" title="外观设置" @click="showSettings = true">
         <span class="nav-ico" v-html="ICONS.palette" />
         <span class="nav-txt">外观</span>
       </button>
@@ -182,7 +182,7 @@ function applyWallpaper(stored: string | null) {
   -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, #000 30%, transparent 100%);
 }
 
-/* ---------- 侧边导航 ---------- */
+/* ---------- 侧边导航：四个模块入口做成有分量的卡片 ---------- */
 .rail {
   position: relative;
   z-index: var(--z-sticky);
@@ -192,7 +192,7 @@ function applyWallpaper(stored: string | null) {
   flex-direction: column;
   align-items: center;
   gap: var(--sp-3);
-  padding: var(--sp-4) var(--sp-3);
+  padding: var(--sp-4) var(--sp-3) var(--sp-3);
   background: var(--glass);
   backdrop-filter: blur(20px) saturate(150%);
   -webkit-backdrop-filter: blur(20px) saturate(150%);
@@ -203,101 +203,175 @@ function applyWallpaper(stored: string | null) {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 5px;
-  padding: 4px 0 14px;
+  gap: 8px;
+  padding: 2px 0 16px;
   width: 100%;
   border-bottom: 1px solid var(--line);
-  margin-bottom: 4px;
 }
 .brand-mark {
-  width: 34px;
-  height: 34px;
+  width: 46px;
+  height: 46px;
   display: grid;
   place-items: center;
-  border-radius: var(--r-md);
-  background: rgba(61, 139, 255, 0.1);
+  border-radius: var(--r-lg);
+  background: linear-gradient(160deg, rgba(61, 139, 255, 0.2), rgba(42, 212, 200, 0.08));
   border: 1px solid var(--line-2);
-  box-shadow: var(--hairline-top);
+  box-shadow: var(--hairline-top), 0 10px 24px -14px rgba(61, 139, 255, 0.8);
 }
 .brand-mark :deep(svg) {
-  width: 21px;
-  height: 21px;
+  width: 27px;
+  height: 27px;
 }
 .brand-name {
   font-size: var(--fs-2xs);
   font-weight: var(--fw-semi);
-  letter-spacing: 0.14em;
+  letter-spacing: 0.2em;
+  text-indent: 0.2em;
   color: var(--ink-3);
 }
 
+/* 四个入口均分导轨主体高度（space-evenly），整根导轨都被占满，不再是挤在中间的一小簇 */
 .nav {
   flex: 1;
+  min-height: 0;
   width: 100%;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: var(--sp-2);
+  justify-content: space-evenly;
+  gap: 8px;
 }
 
 .nav-btn {
   position: relative;
   width: 100%;
+  flex: 0 1 auto;
+  height: 108px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 13px 4px 11px;
-  border-radius: var(--r-md);
+  justify-content: center;
+  gap: 10px;
+  padding: 12px 6px;
+  border-radius: var(--r-lg);
   color: var(--ink-3);
   border: 1px solid transparent;
   transition: color var(--t-base) var(--ease-out),
-    background var(--t-base) var(--ease-out), border-color var(--t-base) var(--ease-out);
+    background var(--t-base) var(--ease-out), border-color var(--t-base) var(--ease-out),
+    box-shadow var(--t-base) var(--ease-out), transform var(--t-base) var(--ease-out);
 }
+/* 悬停先预告模块色，让「这块属于哪个模块」在点之前就有反馈 */
 .nav-btn:hover {
-  color: var(--ink);
-  background: var(--surface-3);
+  color: var(--mod);
+  background: color-mix(in srgb, var(--mod) 10%, var(--surface-3));
+  border-color: color-mix(in srgb, var(--mod) 26%, transparent);
+  transform: translateY(-1px);
 }
-/* 激活态：模块色淡染底 + 左侧发光条 */
+.nav-btn:active {
+  transform: translateY(0) scale(0.985);
+}
+
+/* 激活态：整卡模块色渐变 + 图标底座实心 + 外发光，「我在哪」一眼可见 */
 .nav-btn.active {
   color: var(--mod);
-  background: color-mix(in srgb, var(--mod) 13%, transparent);
-  border-color: color-mix(in srgb, var(--mod) 30%, transparent);
-  box-shadow: var(--hairline-top);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--mod) 22%, transparent),
+    color-mix(in srgb, var(--mod) 7%, transparent)
+  );
+  border-color: color-mix(in srgb, var(--mod) 36%, transparent);
+  box-shadow: var(--hairline-top),
+    0 12px 28px -16px color-mix(in srgb, var(--mod) 80%, transparent);
 }
+.nav-btn.active:hover {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--mod) 27%, transparent),
+    color-mix(in srgb, var(--mod) 10%, transparent)
+  );
+}
+/* 左缘指示条：贴着导轨左边框 */
 .nav-btn.active::before {
   content: '';
   position: absolute;
-  left: -13px;
+  left: calc(var(--sp-3) * -1);
   top: 50%;
   transform: translateY(-50%);
   width: 3px;
-  height: 22px;
+  height: 40px;
   border-radius: var(--r-full);
   background: var(--mod);
-  box-shadow: 0 0 12px var(--mod);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--mod) 85%, transparent);
 }
+
+/* 图标底座：四个入口共用同一视觉锚点；激活时被模块色实心填充。
+   填充色向深色压一档（而不是直接用亮色），保证白色图标在其上可读。 */
 .nav-ico {
-  width: 21px;
-  height: 21px;
-  display: inline-flex;
+  width: 48px;
+  height: 48px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--surface-3) 72%, transparent);
+  border: 1px solid var(--line);
+  box-shadow: var(--hairline-top);
+  transition: background var(--t-base) var(--ease-out),
+    border-color var(--t-base) var(--ease-out), box-shadow var(--t-base) var(--ease-out),
+    color var(--t-base) var(--ease-out);
 }
 .nav-ico :deep(svg) {
-  width: 100%;
-  height: 100%;
+  width: 26px;
+  height: 26px;
 }
+.nav-btn:hover .nav-ico {
+  color: var(--mod);
+  background: color-mix(in srgb, var(--mod) 13%, var(--surface-4));
+  border-color: color-mix(in srgb, var(--mod) 32%, transparent);
+}
+.nav-btn.active .nav-ico {
+  color: #fff;
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--mod) 72%, #0b1220 28%),
+    color-mix(in srgb, var(--mod) 48%, #0b1220 52%)
+  );
+  border-color: color-mix(in srgb, var(--mod) 62%, transparent);
+  box-shadow: 0 8px 20px -9px color-mix(in srgb, var(--mod) 90%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.32);
+}
+
 .nav-txt {
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
   letter-spacing: 0.02em;
 }
 .nav-btn.active .nav-txt {
   font-weight: var(--fw-semi);
 }
-.ghost {
+
+/* 导轨底部：外观设置（与上方入口同一套零件，但不参与平分高度） */
+.rail-foot {
   flex: none;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 6px 4px;
+  border-radius: var(--r-md);
+  color: var(--ink-3);
   border-top: 1px solid var(--line);
-  border-radius: 0 0 var(--r-md) var(--r-md);
-  padding-top: 15px;
+  transition: color var(--t-base) var(--ease-out), background var(--t-base) var(--ease-out);
+}
+.rail-foot:hover {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+.rail-foot:hover .nav-ico {
+  background: var(--surface-4);
+  border-color: var(--line-3);
 }
 
 /* ---------- 主工作区 ---------- */
