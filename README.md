@@ -61,7 +61,7 @@
 | --------- | --------------------------------------------------------------------------- |
 | 前端        | Vue 3 + Vite（设计令牌体系 · **深/浅双主题** + 4 模块工作台 + 自研 SVG 图表 + SSE EventSource；多 Agent 协作走内联时间轴） |
 | 网关        | Spring Boot 3（薄转发：/api/chat、/api/import-image、/api/orchestrate、/api/commit） |
-| Agent 能力层 | Python + FastAPI 微服务：SupervisorAgent 主循环 + 10 个专业子 Agent                    |
+| Agent 能力层 | Python + FastAPI 微服务：SupervisorAgent 主循环 + 10 个可派发子 Agent（另有 `reviewer` 评审节点、`coach` 直答入口） |
 | 记忆        | 双存储 USER.md / MEMORY.md（冻结快照注入）+ Skill 三级渐进加载 + session 短期记忆                |
 | 数据引擎      | SportStore 确定性计算：周聚合 / 周环比（缺口如实标注）/ 日负荷 / ACWR 急慢性负荷比（伤病风险）                 |
 | LLM       | DeepSeek `deepseek-v4-flash`（OpenAI 兼容接口，无 key 自动 mock 降级）                  |
@@ -78,11 +78,11 @@ sport-agent-fullstack/
 │       ├── controller/ChatController.java   # /api/chat /api/import-image /api/commit /api/orchestrate(SSE) /api/health
 │       └── orchestrator/Orchestrator.java   # SSE 薄转发：POST 8001/supervise?stream=1 → 读帧 → 透传前端
 ├── agent-service/      # Python Agent 微服务（编排大脑）
-│   ├── app.py          # FastAPI: /chat /supervise(JSON+SSE) /commit /import-image /plan* /memory /sessions /agent/{name} /health
+│   ├── app.py          # FastAPI: /chat /supervise(JSON 或 ?stream=1 SSE) /commit /import-image /agent/{name} /route /plan(|/plans) /plan/* /memory /sessions /health
 │   ├── requirements.txt / requirements-dev.txt / requirements-ocr.txt
 │   ├── .env            # 含 LLM_API_KEY（已被根目录 .gitignore 排除，切勿提交）
 │   ├── data/           # 记忆与训练记录（自动生成）
-│   ├── tests/          # pytest：解析 / 意图 / 分析 / 存储 / HTTP 鉴权
+│   ├── tests/          # pytest 104 条：解析 / 意图 / 分析 / 计划(质量门+产出类型) / 技能 / 存储 / HTTP 鉴权
 │   ├── skills/         # 4 个可插拔教练技能（SKILL.md，按触发词动态挂载）
 │   ├── _dump_prompt.py # 诊断工具：打印任意输入真正发给 LLM 的完整提示词（4 层拼装结果，排障/自查用）
 │   └── src/
@@ -92,31 +92,38 @@ sport-agent-fullstack/
 │       ├── plan_store.py        # 计划库：pending 两段确认 / 切换 / 删除
 │       ├── skill_loader.py      # Skill 三级渐进加载 + 蒸馏 / patch
 │       ├── memory.py            # 双存储记忆（文件锁并发保护）
-│       └── agents/              # 10 个专业子 Agent + 注册表 agent_catalog
-│           ├── recorder_agent.py / analyst_agent.py / searcher_agent.py
-│           ├── clinician_agent.py / expert_agent.py / planner_agent.py
+│       └── agents/              # 10 个可派发子 Agent + reviewer + coach + 注册表 agent_catalog
+│           ├── recorder_agent.py / analyst_agent.py / research_agent.py（类名 SearcherAgent）
+│           ├── posture_agent.py（类名 ClinicianAgent）/ expert_agent.py / planner_agent.py
 │           ├── memory_agent.py / scheduler_agent.py / writer_agent.py / general_agent.py
-│           ├── reviewer_agent.py   # 评审：PASS / ISSUES 协议
+│           ├── coach_agent.py      # 谭成义人格教练：健身域唯一直答入口（内部再分流记录/分析/问答）
+│           ├── reviewer_agent.py   # 评审：PASS / ISSUES 协议（主循环内部节点，不参与 LLM 拆解）
 │           └── base.py         # BaseAgent._llm：空串注入哨兵兜底文案（供门控识别）
 ├── frontend/           # Vue 3 + Vite（设计令牌 + 组件分层）
-│   ├── package.json / vite.config.ts
+│   ├── package.json / vite.config.ts / index.html   # index.html：首屏按明暗偏好上色 + 品牌 favicon
+│   ├── public/favicon.ico          # 品牌图标（渐变底+哑铃，7 档尺寸），同时被桌面快捷方式复用
+│   ├── scripts/gen-favicon.py      # 图标生成脚本（纯标准库 struct/zlib，不需要 Pillow；重跑可逐字节复现）
 │   └── src/
+│       ├── App.vue / AppWorkbench.vue   # 工作台外壳：导轨导航 + 模块切换（Transition + KeepAlive）
 │       ├── styles/          # tokens.css（设计令牌，含深/浅双主题）/ base.css（reset+动效）/ prose.css（Markdown 排版）
-│       ├── utils/wallpaper.ts      # 壁纸预设（灰白系 4 + 深色系 4）+ 明暗偏好持久化
+│       ├── utils/           # wallpaper（壁纸预设灰白4+深色4 / 明暗偏好持久化）/ markdown / image（压缩上传）/ session
 │       ├── components/
 │       │   ├── ui/          # AppCard / StatTile / AppButton / AppPill / SectionTitle / EmptyState / SkeletonBlock / StatusDot
-│       │   ├── charts/      # LineChart（渐变面积+平滑曲线+悬停提示）/ ZoneBar（心率区间）
+│       │   ├── charts/      # LineChart（渐变面积+平滑曲线+悬停提示）/ ZoneBar（心率区间）/ types.ts
 │       │   ├── chat/        # SessionList / ChatHeader / MessageBubble / ThinkingTrace（多 Agent 时间轴）/ ChatComposer / ProfilePanel / PendingCommitCard / DropOverlay
 │       │   └── ThemeSettings.vue   # 外观抽屉：界面明暗 + 灰白/深色壁纸分组 + 自定义上传
 │       ├── composables/     # useSessions（多会话持久化）/ useAgentChat（发送/编排/导入/确认/画像）
 │       ├── constants/agents.ts     # 子 Agent 中文名 + 职责 + 图标 + 色相
 │       ├── views/           # Chat / DashboardView / PlanView / MemoryView
 │       └── api/client.ts    # chat / health / importImage / orchestrate(EventSource) / commitRecords / plan / memory
-├── start-all.bat       # 一键启动三服务（各自独立窗口；启动前清空代理变量，防 TLS 被本机代理掐断）
+├── start-all.bat       # 一键启动三服务（各自独立窗口；项目根由 %~dp0 自推导，可移到任意位置/多副本共存；启动前清空代理变量，防 TLS 被本机代理掐断）
+├── AGENTS.md           # 项目规则：沟通语言 / 改动约束 / 测试要求 / 版本迭代
 ├── _token_check.py     # 诊断工具：子 Agent 上下文体量对照（全量记忆+20轮历史 vs 按需召回+关历史，打桩不触网）
 ├── docker-compose.yml  # 三服务编排（见下方「Docker 部署」说明，当前需补 Dockerfile）
 ├── .gitignore          # 排除 .env 密钥 / 构建产物 / 运行时数据
-└── 架构方案.md         # 完整架构、接口契约、演进路线
+├── 架构方案.md         # 完整架构、接口契约、演进路线
+├── 谭成义健身视角.md / 谭成义减脂三分化计划.md   # 教练人格蒸馏来源（训练观 / 周期计划方法）
+└── 面试要点.md         # 面试讲法与追问应答
 ```
 
 
@@ -171,6 +178,9 @@ start-all.bat
 > 前提：`backend\target\sport-agent-backend-0.1.0.jar` 已构建——若 backend 窗口报找不到 jar，  
 > 请先按上方「快速开始 · 步骤 2」执行 `mvn clean package -DskipTests`。  
 > 注意：脚本直接 `java -jar`，若 8080 已被占用会启动失败，先释放端口再跑。
+>
+> 项目根目录由脚本自身位置推导（`set BASE=%~dp0`）：**整个文件夹搬到别处、或同时存在多份副本时，双击哪份就启动哪份**。  
+> 早期版本写死绝对路径，副本双击会静默启动**原目录**的服务，表现为「改了没生效」，排查成本很高。
 
 ## 安全（2026-09 加固）
 
@@ -183,7 +193,7 @@ start-all.bat
 - **CORS**：旧版 `src/server.py`（休眠的 stdlib HTTP 入口）从 `*` 收紧为仅回显本机 Origin，并走同一 token 校验。
 - **异常脱敏**：Agent 内部异常只记服务端日志，客户端拿通用文案；旧版 `.env` 上传限制等回归见更新日志。
 
-## 测试（90 个用例，`pytest tests/` 全绿）
+## 测试（104 个用例，`pytest tests/` 全绿）
 
 ```bash
 cd agent-service
@@ -191,14 +201,30 @@ python -m pip install -r requirements-dev.txt   # pytest + httpx
 python -m pytest tests/ -q
 ```
 
-覆盖五层：文件导入解析（GPX/CSV/OCR 规则兜底）、意图管线（目标检测回归）、  
-分析层（心率区间/负荷/力量趋势）、plan_store 流转与并发、HTTP 层（鉴权中间件 + 异常脱敏）。  
+`tests/` 下 9 个文件，覆盖七层：
+
+| 层 | 文件 | 覆盖内容 |
+| --- | --- | --- |
+| 解析 | `test_parsers.py` | 文件导入（GPX / CSV / OCR 规则兜底） |
+| 意图 | `test_intent.py` | 目标检测、编排升级判定、coach 意图分流（「要点/技巧/怎么做」不被误判成查数据） |
+| 分析 | `test_analyze.py` | 心率区间 / 负荷 / 力量趋势 |
+| 计划 | `test_plan_store.py` · `test_plan_guard.py` · `test_planner_prompt.py` | 流转与并发、写入点质量门（拦降级文本）、planner 产出类型（周报 vs 计划） |
+| 技能 | `test_skills.py` | 三级渐进加载 / 触发词去重 / 主理 Agent 门控 |
+| 存储 | `test_memory.py` | 双存储读改写 + 文件锁并发（多线程 append 零丢失） |
+| HTTP | `test_http_auth.py` | 鉴权中间件 + 异常脱敏 |
+
 LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-ocr.txt`。
 
 
-## 当前已验证（端到端全通 ✅，2026-08-19）
+## 当前已验证（端到端全通 ✅，最近复核 2026-09-13/14）
 
 完整链路已实测跑通，三服务均 LISTENING（8001 / 8080 / 5173）：
+
+**双路径实测（2026-09-13，真实 LLM，6/6）**
+- ✅ coach 直答：「怎么练胸」6.2s /「我膝盖疼还能跑吗」4.8s（命中 `posture_relief`）
+- ✅ supervisor 编排：「帮我生成周报」27.4s /「总结这周的训练情况」21.6s（`mode=orchestrated`，携带 13 / 11 条 SSE 事件）
+- ✅ 边界不编排：「周报的格式是什么」「总结一下卧推要点」——谈论 ≠ 触发
+- ✅ coach 修复对照：「深蹲有进步吗」「卧推怎么样」仍走力量分析（无记录时如实提示），分析路径未被改坏
 
 **OCR 截图导入（2026-08-19 布局配对修复后）**
 - ✅ 华为户外跑步小结截图：平均心率 149 / 平均配速 8'00" / 运动时长 47:22 / 距离 5.92km / 日期 全部正确解析入库
@@ -230,6 +256,22 @@ LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-
   跨会话常驻并注入各 Agent 的 system prompt（真实 LLM 模式下自动解析落地；mock 模式仅提示、不写盘）。
 
 ## 更新日志（迭代脉络）
+
+### 2026-09-14 planner 产出类型切换：修掉「要周报却给计划」
+- **问题**：编排路径里要「周报」，产出标题却是「你的训练计划（修正版）」——**要周报给计划**。根因是一条链：`_fallback_plan` 把周报拆成 `searcher + analyst + planner` → `planner_agent` 的提示词**写死「生成一份训练计划」** → `_synthesize`「最后一步是 planner 就直接采用其产出」。更麻烦的是 `_critic` 的重写路径调的是同一个写死提示词，**评审就算正确指出「用户要的是周报」也救不回来**；
+- **修法**（`f86fbaa`）：`planner_agent` 改为产出类型可切换——新增 `deliverable_of(task)` 判定 `WEEKLY` / `PLAN`，两套骨架各自独立（周报＝本期概览 / 数据解读 / 问题诊断 / 下周建议；计划骨架保持原样），`_build_plan_prompt` 更名 `_build_prompt(user_msg, kind)`；`orchestrator._dispatch` 与 `_critic` 都补传 `ctx["task"]`——否则被 `@s1`/`@s2` 拼进来的前序产出（含「计划」字样）会把周报带偏，重写路径更是完全取不到「周报」字样；
+- 新增 `tests/test_planner_prompt.py` 10 条覆盖两个方向，测试 94 → **104 passed**。
+
+### 2026-09-13 coach 意图分流修复：「要点/技巧/怎么做」不再被误判成查训练数据
+- **问题**：`coach_agent._classify` 的兜底是「消息 ≤12 字 + 能抠出一个动作名 → 走力量趋势分析」，而「要点 / 技巧 / 怎么做」这组技术问法**不在任何白名单里** → 实测 4/4 误判：`总结一下卧推要点` 抠出动作名「总结」→ 回「『总结』还没记录过训练数据」；`卧推要点` / `深蹲技巧` / `引体向上怎么做` 同理；
+- **对照组暴露根因**：`总结一下卧推的发力要点` 因带「发力」（属 training-advice 白名单）而侥幸走对 → **漏的是词表，不是兜底逻辑**。修法是把技术问法词并入「交给 LLM 直答」的词表，**不收紧兜底**（避免误伤既有行为）；
+- 新增 `TestCoachClassify` 双向锁定：4 条修复用例须正常作答，同时 `深蹲有进步吗` / `卧推怎么样` 仍须走力量分析（回归保护）。测试 90 → **94**；
+- 同批跑通**编排双路径实测 6/6**：coach 直答「怎么练胸」6.2s /「我膝盖疼还能跑吗」4.8s（命中 `posture_relief`）；编排「帮我生成周报」27.4s /「总结这周的训练情况」21.6s（均 `mode=orchestrated`，携带 13 / 11 条 SSE 事件）；边界「周报的格式是什么」「总结一下卧推要点」正确不编排。
+
+### 2026-09-13 晚 导轨重做 + 品牌图标 + 启动脚本去硬编码
+- **导轨重做**（`ef58412`）：四个模块入口（对话 / 数据 / 计划 / 记忆）原先是一小簇居中挤着的图标，改成**等分导轨高度的 110px 大卡片**——48px 模块色实心底座 + 26px 图标 + 中文标签；悬停先用模块色预告，选中态底色向 `#0b1220` 压深 28%~52%（青色 `#2ad4c8` 直填时白图标对比度只有约 1.7，压深后到约 4）。布局改 `justify-content: space-evenly` + 固定卡片高度——`flex:1` 撞上 `max-height` 后多余空间不会回流，靠它只会得到「中间一小簇 + 上下全空」；
+- **品牌图标**（`6a37a4a` + `a5649b7`）：项目原先**连 favicon 都没有**，补 `frontend/public/favicon.ico`（圆角方形 `#3d8bff→#2ad4c8` 渐变底 + 白色哑铃，配色取自 `tokens.css` 的 `--accent`/`--accent-2`，整体压深保白图标对比度）。7 档尺寸 = 16/24/32/48/64/128 走 BMP + 256 走 PNG 压缩，共 106KB（全部用 BMP 是 372KB）；`index.html` 补 `icon` / `apple-touch-icon`；生成脚本 `frontend/scripts/gen-favicon.py` 一并入库（纯标准库，**已验证重跑输出与仓库版 sha256 逐字节一致**，不是不可复现的黑盒）；
+- **启动脚本去硬编码**（`113d1d1`）：`start-all.bat` 原先写死绝对路径，复制到别处双击会静默启动**原目录**的服务（表现为「改了没生效」）；改为 `set BASE=%~dp0` 由脚本自身位置推导，多副本共存时双击哪份启动哪份。
 
 ### 2026-09-13 晚 灰白（浅色）主题 + 字号整体上调一档
 - **浅色主题**（`093a870`）：`tokens.css` 新增 `:root[data-theme='light']` 整套令牌——层级逻辑由「越亮越高」翻转成「越白越高」（`surface-0` 最灰 → `surface-2` 纯白卡片），描边/内高光/投影/毛玻璃全部换成适配浅底的极淡灰晕，语义色与心率区间统一压深一档保白底对比度；兼容层里几个指向深色硬编码值的旧变量（`code-bg` / `pre-bg` / `pre-text` / `user-msg`）同步覆盖；
