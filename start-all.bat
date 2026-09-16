@@ -5,8 +5,13 @@ REM 项目根目录由脚本自身位置推导（%~dp0）。%~dp0 自带结尾�
 REM 拼 %BASE%子目录；整个文件夹搬到别处/多份副本共存时，双击哪份就启动哪份。
 set BASE=%~dp0
 set JAVA_HOME=C:\Users\24162\tools\jdk17\jdk-17.0.20+8
-set PY=C:\Users\24162\.workbuddy\binaries\python\versions\3.13.12\python.exe
 set NPM=C:\Users\24162\.workbuddy\binaries\node\versions\22.22.2-2\npm.cmd
+REM agent-service 自 2026-09-16 起用 LangGraph 编排，必须走项目专属 venv。
+REM 若该解释器不存在（换机器 / 没建过 venv），先执行：
+REM   cd agent-service
+REM   python -m venv .venv
+REM   .venv\Scripts\python -m pip install -r requirements.txt
+set PY=%BASE%agent-service\.venv\Scripts\python.exe
 
 REM 关键：清掉本机代理变量。本机代理（如 127.0.0.1 端口的透明代理）会让
 REM Python 到 api.deepseek.com 的 TLS 握手被掐断（SSL: UNEXPECTED_EOF_WHILE_READING），

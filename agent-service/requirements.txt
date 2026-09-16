@@ -1,2 +1,8 @@
+# 运行时依赖（2026-09-16 起编排层用 LangGraph，故不再是「零依赖」）
+# 安装：python -m venv .venv && .venv\Scripts\python -m pip install -r requirements.txt
 fastapi>=0.110
 uvicorn[standard]>=0.27
+# 编排图：StateGraph（节点/条件边）、checkpointer 依赖链
+# langgraph 1.2.11 实测；langchain-core 是它的底层依赖，显式钉住便于复现
+langgraph>=1.0,<2.0
+langgraph-checkpoint-sqlite>=3.0,<4.0

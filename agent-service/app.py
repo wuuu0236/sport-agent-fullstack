@@ -21,7 +21,11 @@ import threading
 import traceback
 from queue import Queue
 
-from src import config, memory
+from src import config, memory, intent
+# 意图判定：LLM 结构化分类为主，关键词规则为兜底（2026-09-16，见 src/intent.py）。
+# `_needs_orchestration` 这个名字保留为规则兜底的别名——它仍是 classify() 的降级路径，
+# 不是死代码，同时也是意图回归测试的直接入口（tests/test_intent.py）。
+from src.intent import rule_needs_orchestration as _needs_orchestration, ORCHESTRATE
 from src.supervisor import route
 from src.agents import get_agent
 from src.agents.memory_agent import is_memory_intent
@@ -169,9 +173,13 @@ def chat(req: ChatReq):
         return {"agent": "plan_manager", "output": out, "metadata": {}}
 
 
-    # 自动升级：复杂任务（多步综合 / 伤病会诊）自动走 SupervisorAgent 主从编排，
-    # 普通问答 / 记录仍走单 Agent 路由——对齐业界「主 Agent 运行中自动判断派活」。
-    if _needs_orchestration(req.message):
+    # 自动升级：复杂任务自动走多 Agent 主从编排，普通问答 / 记录仍走单 Agent 路由。
+    # 判定改为 LLM 结构化分类（src/intent.classify）——原关键词规则要求「周报 /
+    # 总结+时间范围 / 数据驱动计划」三类魔法词才编排，导致「膝盖疼，分析是不是深蹲
+    # 姿势问题，给康复方案」「对比上个月和这个月的跑步数据」这类多专长任务被当成
+    # 单点问答硬答。规则仍作为 mock 模式与分类失败时的兜底。
+    decision = intent.classify(req.message)
+    if decision["kind"] == ORCHESTRATE:
         events: list = []
         def _emit(e):
             events.append(e)
@@ -180,10 +188,12 @@ def chat(req: ChatReq):
         memory.append_session("assistant", final)
         # 编排路径此前 metadata 恒为 {}，看不到子 Agent 到底吃到了哪些技能；
         # 技能注入修好后一并把命中情况回传，便于自查（与单 Agent 路径口径一致）。
+        # intent 一并回传：分类是「为什么这次走了编排」的唯一依据，排障时不必猜。
         return {"agent": "supervisor", "output": final, "events": events,
                 "mode": "orchestrated",
                 "metadata": {"used_skills": list(sv.used_skills.keys()),
-                             "skill_hits": sv.used_skills}}
+                             "skill_hits": sv.used_skills,
+                             "intent": decision}}
     name = route(req.message)
     agent = get_agent(name)
     # 技能注入带主理 Agent 门控：只给本 Agent 该吃的 SOP（避免解析 SOP 串进教练分析）；
@@ -200,7 +210,8 @@ def chat(req: ChatReq):
     return {
         "agent": name,
         "output": out,
-        "metadata": {"used_skills": [s.get("name") for s in skills]},
+        "metadata": {"used_skills": [s.get("name") for s in skills],
+                     "intent": decision},
     }
 
 
@@ -454,47 +465,6 @@ def _supervise_stream(task: str):
         if e is None:
             break
         yield f"data: {json.dumps(e, ensure_ascii=False)}\n\n"
-
-
-def _needs_orchestration(msg: str) -> bool:
-    """判断一条消息是否需要多 Agent 主从编排（而非单 Agent 直答）。
-
-    对齐业界「主 Agent 运行中自动判断该不该派 subagent」：默认单 Agent 路由，
-    仅在任务明显需要「多步 / 多工具 / 多专长综合」时升级到 SupervisorAgent。
-    """
-    # 记录训练类：recorder 单 Agent 即可，不编排（避免『记录一次减脂训练』误判）
-    if any(k in msg for k in ("记一次", "记录", "保存", "入库", "添加")) and \
-       any(k in msg for k in ("跑", "公里", "km", "组", "次", "kg", "训练")):
-        return False
-    # 健身域已统一归 coach（谭成义唯一直答）；编排只留给「多源汇合」用例：
-    # 需要同时用到外部资料 / 历史数据计算 / 综合成文的，才值得多步编排。
-    # ① 周报类：汇报表（检索 + 分析 + 综合）。
-    #    但「谈论周报」≠「要生成周报」：概念询问类（格式/包含什么/怎么写）不编排。
-    if "周报" in msg:
-        if any(k in msg for k in ("什么", "格式", "怎么写", "包含", "模板", "例子", "示例")):
-            return False
-        return True
-
-    # ② 阶段性总结/回顾类：总结类动词 + 时间范围词同时出现。
-    #    「总结一下卧推要点」是单点问题（无时间范围），不编排；
-    #    「总结这周的训练」需要读周聚合数据再综合，编排。
-    _SUMMARY_KW = ("总结", "汇总", "回顾", "复盘", "报告")
-    _RANGE_KW = ("这周", "本周", "上周", "最近", "近期", "本月", "这个月",
-                 "一个月", "月度", "阶段")
-    if any(k in msg for k in _SUMMARY_KW) and any(k in msg for k in _RANGE_KW):
-        return True
-
-    # ③ 数据驱动计划类：分析/依据 + 数据来源 + 计划产出，三要素齐才编排。
-    #    与单源计划请求区分：「给我安排练胸计划」没有数据依据，coach 直答即可；
-    #    「根据我的训练数据安排计划」要先读数据再综合，走编排。
-    _DATA_KW = ("分析", "根据", "结合", "基于", "参考")
-    _SRC_KW = ("数据", "情况", "记录", "表现", "进步")
-    _PLAN_KW = ("计划", "方案", "安排", "课表")
-    if any(k in msg for k in _DATA_KW) and any(k in msg for k in _SRC_KW) \
-            and any(k in msg for k in _PLAN_KW):
-        return True
-
-    return False
 
 
 def _coach_answer(msg: str) -> str:

@@ -7,7 +7,10 @@
 另覆盖 coach 的 _classify（2026-09-13 补）：此前只测了编排判定，
 coach 内部意图分流零覆盖，「要点/技巧/怎么做」类问法静默答非所问。
 """
+import pytest
+
 from app import _detect_goal, _needs_orchestration
+from src import config, intent
 from src.agents.coach_agent import CoachAgent
 
 _coach = CoachAgent()
@@ -117,3 +120,62 @@ class TestCoachClassify:
     def test_pain_still_goes_to_chat(self):
         # 伤痛红线：仍走对话（不能被任何新白名单截去别处）
         assert _coach._classify("我膝盖疼还能跑吗") == "chat"
+
+
+class TestClassify:
+    """LLM 意图分类（2026-09-16 新增）：关键词规则 → LLM 结构化判断，规则降级为兜底。
+
+    为什么必须锁住：
+    · 关键词规则只有「周报 / 总结+时间范围 / 数据驱动计划」三类魔法词才编排，
+      「膝盖疼，分析是不是深蹲姿势问题，给康复方案」这类多专长任务被硬答；
+    · 但分类一旦走 LLM，就有「模型抽风把普通问答升级成 20 秒编排」的风险，
+      所以要锁死两个方向：复杂任务要能识别为编排，简单问答不能被升级。
+    """
+    @pytest.fixture
+    def real_mode(self, monkeypatch):
+        """mock_mode 是只读 property（= not LLM_API_KEY），造真实模式得改 key。"""
+        monkeypatch.setattr(config.CONFIG, "LLM_API_KEY", "test-key")
+
+    def test_mock_mode_falls_back_to_rule(self, monkeypatch):
+        monkeypatch.setattr(config.CONFIG, "LLM_API_KEY", "")
+        r = intent.classify("帮我生成周报")
+        assert r["kind"] == intent.ORCHESTRATE and r["via"] == "rule"
+        r2 = intent.classify("膝盖疼还能跑吗")
+        assert r2["kind"] != intent.ORCHESTRATE
+
+    def test_force_orchestrate_skips_classify(self):
+        # /supervise 是显式编排入口，不做分类（也不该白花一次调用）
+        r = intent.classify("随便一句话", force_orchestrate=True)
+        assert r["kind"] == intent.ORCHESTRATE and r["via"] == "forced"
+
+    def test_llm_json_parsed(self, real_mode, monkeypatch):
+        payload = ('{"type": "orchestrate", "reason": "需要查资料+算数据+成文",'
+                   ' "suggested_agents": ["searcher", "analyst", "planner", "伪造的agent"]}')
+        monkeypatch.setattr(intent.llm, "chat", lambda *a, **k: payload)
+        r = intent.classify("备战半马，查最新方法，结合我的水平排8周计划")
+        assert r["kind"] == intent.ORCHESTRATE and r["via"] == "llm"
+        # 不在可派发目录里的名字必须被过滤，否则后面 _parse_plan 会静默丢步
+        assert r["suggested_agents"] == ["searcher", "analyst", "planner"]
+
+    def test_llm_markdown_wrapped_json_still_parsed(self, real_mode, monkeypatch):
+        payload = '```json\n{"type": "direct_answer", "reason": "单点问题", "suggested_agents": []}\n```'
+        monkeypatch.setattr(intent.llm, "chat", lambda *a, **k: payload)
+        assert intent.classify("卧推要点")["kind"] == intent.DIRECT
+
+    def test_garbage_output_falls_back_to_rule(self, real_mode, monkeypatch):
+        # 分类失败 → 保守回退规则：宁可少拆一次，也不能把问答升级成编排
+        monkeypatch.setattr(intent.llm, "chat", lambda *a, **k: "我觉得这个问题很复杂")
+        r = intent.classify("膝盖疼还能跑吗")
+        assert r["via"] == "rule" and r["kind"] != intent.ORCHESTRATE
+
+    def test_llm_exception_falls_back_to_rule(self, real_mode, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("network down")
+        monkeypatch.setattr(intent.llm, "chat", boom)
+        r = intent.classify("帮我生成周报")
+        assert r["via"] == "rule" and r["kind"] == intent.ORCHESTRATE
+
+    def test_rule_alias_still_exported_from_app(self):
+        # app._needs_orchestration 保留为规则别名（测试与历史引用的入口）
+        assert _needs_orchestration("帮我生成周报") is True
+        assert _needs_orchestration("给我安排一个练胸计划") is False
