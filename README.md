@@ -10,9 +10,10 @@
 
 ## 项目亮点（为什么值得讲）
 
-1. **Claude Code 式主-从多 Agent 协作（分级触发）**——健身域问题统一由谭成义人格教练单 Agent 直答；  
-   多源汇合任务才升级编排（周报 / 阶段总结 / 数据驱动计划三类特征，`_needs_orchestration`）：主 Agent 用 LLM 把任务拆成结构化子任务（强 JSON schema，**拆几步、派给谁、写不写 @**、子 Agent 白名单校验），  
-   逐节点**代码门控派发**，只回收产出摘要（截断防超长），最后由主 Agent 亲自综合收口。  
+1. **Claude Code 式主-从多 Agent 协作（分级触发 + LangGraph 编排）**——健身域问题统一由谭成义人格教练单 Agent 直答；  
+   多专长协作任务才升级编排（由 `src/intent.py` 的 **LLM 结构化分类**判定，关键词规则仅作 mock/失败兜底）：主 Agent 用 LLM 把任务拆成结构化子任务（强 JSON schema，**拆几步、派给谁、写不写 @**、子 Agent 白名单校验），  
+   再经**依赖校验**（`@sN` 漏引自动补、无效引用清除）后逐节点**代码门控派发**，只回收产出摘要（截断防超长），最后由主 Agent 亲自综合收口。  
+   整个主循环是 **LangGraph StateGraph**（plan → validate → dispatch ⇄ → review → rewrite → synthesize），条件边表达分支而不是散落的 if。  
    执行类子 Agent（记录解析 / 数据计算 / 康复知识库）以确定性代码为主，不依赖 LLM 自觉。  
    协作全程通过 **SSE 实时推送**到前端看板：拆解了哪几步、谁在跑、谁失败、谁产出，全部**肉眼可见**。
 2. **子 Agent 独立工作空间**——写库子 Agent（recorder）解析结果先进**暂存区**，主循环结束发 `pending_commit`  
@@ -33,10 +34,12 @@
 你点发送
   ↓ 前端 Chat.vue —— 判断走编排 → EventSource 订阅 /api/orchestrate(SSE)
   ↓ Java 网关 :8080 —— Orchestrator 薄转发：POST 8001/supervise?stream=1，读帧透传
-  ↓ Python 主 Agent :8001 —— SupervisorAgent.run(task, emit)
-      start → _plan(LLM 拆解→JSON steps；失败→代码模板兜底)
-           → 逐节点: agent_start → _dispatch(替换@s1→调子Agent→空/哨兵判失败) → agent_done|agent_error
-           → _synthesize(单步直接用；最后成功步是 planner 用其产出；否则主 Agent 亲自 LLM 综合)
+  ↓ Python 主 Agent :8001 —— LangGraph StateGraph（src/graph.py）
+      start → plan(LLM 拆解→JSON steps；失败→按任务类型分档的代码兜底)
+           → validate(依赖校验：@sN 漏引自动补、无效引用清除)
+           → dispatch ⇄ dispatch（逐节点：替换@s1→调子Agent→空/哨兵判失败→agent_done|agent_error）
+           → review(PASS/ISSUES) ──ISSUES 且被评节点是 planner──→ rewrite(仅重写一次) → synthesize
+           → synthesize(单步直接用；最后成功步是 planner 用其产出；否则主 Agent 亲自 LLM 综合)
            → complete(output, final) → 若有暂存 → pending_commit(count, records)
   ↓ 子 Agent 独立执行 —— 上下文隔离（技能按主理 Agent 门控注入 `match_skills_for`：未声明 owner 全开放 / 同名才注入 / coach 例外吸收 clinician、expert；无对话历史 / 记忆按需召回 Top5；
      planner 例外：强制全量注入用户画像，防伤病限制被语义召回漏掉），只交产出字符串
@@ -53,7 +56,7 @@
 - 另有 `reviewer`(评审 Agent，PASS/ISSUES 协议) 供编排收口前复核；  
   **`coach`(谭成义人格教练) 是独立入口而非别名**——健身域问题统一由它单 Agent 直答。
 - 保留旧别名：`research`→searcher、`posture`→clinician、`memorist`→memory。
-- 编排触发：三类多源汇合特征升级编排（`_needs_orchestration`：周报 / 阶段总结+时间范围 / 数据驱动计划三要素齐），记录类与健身域问答不进主循环。
+- 编排触发：`src/intent.py` 的 LLM 分类判定「单 Agent 直答 / 数据操作 / 多 Agent 编排」——需要「查资料 + 算数据 + 出成品」两件以上、跨期对比、或要周报/阶段总结/排期计划成品时才编排；记录类与健身域问答不进图（分类失败或 mock 模式退回原关键词规则，宁可少拆一次也不误升级）。
 
 ## 技术栈（混合栈）
 
@@ -61,7 +64,7 @@
 | --------- | --------------------------------------------------------------------------- |
 | 前端        | Vue 3 + Vite（设计令牌体系 · **深/浅双主题** + 4 模块工作台 + 自研 SVG 图表 + SSE EventSource；多 Agent 协作走内联时间轴） |
 | 网关        | Spring Boot 3（薄转发：/api/chat、/api/import-image、/api/orchestrate、/api/commit） |
-| Agent 能力层 | Python + FastAPI 微服务：SupervisorAgent 主循环 + 10 个可派发子 Agent（另有 `reviewer` 评审节点、`coach` 直答入口） |
+| Agent 能力层 | Python + FastAPI 微服务 + **LangGraph StateGraph** 编排（plan → validate → dispatch → review → rewrite → synthesize）：10 个可派发子 Agent，另有 `reviewer` 评审节点与 `coach` 直答入口 |
 | 记忆        | 双存储 USER.md / MEMORY.md（冻结快照注入）+ Skill 三级渐进加载 + session 短期记忆                |
 | 数据引擎      | SportStore 确定性计算：周聚合 / 周环比（缺口如实标注）/ 日负荷 / ACWR 急慢性负荷比（伤病风险）                 |
 | LLM       | DeepSeek `deepseek-v4-flash`（OpenAI 兼容接口，无 key 自动 mock 降级）                  |
@@ -82,11 +85,14 @@ sport-agent-fullstack/
 │   ├── requirements.txt / requirements-dev.txt / requirements-ocr.txt
 │   ├── .env            # 含 LLM_API_KEY（已被根目录 .gitignore 排除，切勿提交）
 │   ├── data/           # 记忆与训练记录（自动生成）
-│   ├── tests/          # pytest 104 条：解析 / 意图 / 分析 / 计划(质量门+产出类型) / 技能 / 存储 / HTTP 鉴权
+│   ├── tests/          # pytest 127 条：解析 / 意图(LLM分类+规则兜底) / 编排图 / 分析 / 计划(质量门+产出类型) / 技能 / 存储 / HTTP 鉴权
 │   ├── skills/         # 4 个可插拔教练技能（SKILL.md，按触发词动态挂载）
+│   ├── .venv/          # 项目专属虚拟环境（LangGraph 依赖，不入库）
 │   ├── _dump_prompt.py # 诊断工具：打印任意输入真正发给 LLM 的完整提示词（4 层拼装结果，排障/自查用）
 │   └── src/
-│       ├── orchestrator.py      # SupervisorAgent：_plan(LLM拆解)/_dispatch(代码门控派发)/_synthesize(主Agent收口)
+│       ├── graph.py             # LangGraph StateGraph 编排图：plan→validate→dispatch⇄→review→(rewrite)→synthesize
+│       ├── intent.py            # 意图分类：LLM 结构化输出为主，原关键词规则 _needs_orchestration 为兜底
+│       ├── orchestrator.py      # SupervisorAgent 门面（对外契约 run(task, emit) 不变，内部委托 graph）
 │       ├── supervisor.py        # 单 Agent 关键词路由（健身域统一归 coach 直答）
 │       ├── sport_data.py        # SportStore：暂存队列 _STAGED + 周聚合/环比/日负荷/ACWR 确定性计算
 │       ├── plan_store.py        # 计划库：pending 两段确认 / 切换 / 删除
@@ -136,10 +142,14 @@ sport-agent-fullstack/
 
 **1. agent-service（端口 8001）**
 
+> 2026-09-16 起编排层用 LangGraph，agent-service **不再依赖全局环境**，走项目专属 venv。
+
 ```bash
 cd agent-service
-pip install -r requirements.txt
-python -m uvicorn app:app --port 8001 --host 127.0.0.1
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements.txt   # Windows
+# source .venv/bin/activate && pip install -r requirements.txt   # macOS/Linux
+.venv/Scripts/python -m uvicorn app:app --port 8001 --host 127.0.0.1
 ```
 
 **2. backend（端口 8080，需 JDK17 + Maven）**
@@ -193,20 +203,21 @@ start-all.bat
 - **CORS**：旧版 `src/server.py`（休眠的 stdlib HTTP 入口）从 `*` 收紧为仅回显本机 Origin，并走同一 token 校验。
 - **异常脱敏**：Agent 内部异常只记服务端日志，客户端拿通用文案；旧版 `.env` 上传限制等回归见 `CHANGELOG.md`。
 
-## 测试（104 个用例，`pytest tests/` 全绿）
+## 测试（127 个用例，`pytest tests/` 全绿）
 
 ```bash
 cd agent-service
-python -m pip install -r requirements-dev.txt   # pytest + httpx
-python -m pytest tests/ -q
+.venv/Scripts/python -m pip install -r requirements-dev.txt   # pytest + httpx（venv 内）
+.venv/Scripts/python -m pytest tests/ -q
 ```
 
-`tests/` 下 9 个文件，覆盖七层：
+`tests/` 下 10 个文件，覆盖八层：
 
 | 层 | 文件 | 覆盖内容 |
 | --- | --- | --- |
 | 解析 | `test_parsers.py` | 文件导入（GPX / CSV / OCR 规则兜底） |
-| 意图 | `test_intent.py` | 目标检测、编排升级判定、coach 意图分流（「要点/技巧/怎么做」不被误判成查数据） |
+| 意图 | `test_intent.py` | 目标检测、规则兜底判定、**LLM 分类（JSON 解析 / 垃圾输出回退 / 显式编排）**、coach 意图分流（「要点/技巧/怎么做」不被误判成查数据） |
+| 编排图 | `test_graph.py` | **事件序列契约（前端/网关依赖）**、逐步派发与失败继续、`@sN` 依赖校验（补引 / 清无效引用）、评审重写只做一次、兜底模板分档 |
 | 分析 | `test_analyze.py` | 心率区间 / 负荷 / 力量趋势 |
 | 计划 | `test_plan_store.py` · `test_plan_guard.py` · `test_planner_prompt.py` | 流转与并发、写入点质量门（拦降级文本）、planner 产出类型（周报 vs 计划） |
 | 技能 | `test_skills.py` | 三级渐进加载 / 触发词去重 / 主理 Agent 门控 |

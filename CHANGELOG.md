@@ -3,6 +3,33 @@
 > 本文件由 README 拆出（2026-09-15）：README 只保留项目介绍 / 功能 / 架构 / 快速开始等当前状态，
 > 按时间的迭代记录统一放这里。
 
+### 2026-09-16 编排层迁移 LangGraph StateGraph + LLM 意图分类（P0 三项）
+按《技术选型与优化方案》实施 P0。**编排层不再是手写主循环**——`src/graph.py` 的 StateGraph 与 `src/intent.py` 的意图分类，测试 104 → **127 passed**。
+
+- **编排图（`src/graph.py`，新增）**：`plan → validate → dispatch ⇄ dispatch → review →(rewrite)→ synthesize`，条件边表达分支。`dispatch` 自循环一次跑一步（与迁移前 for 循环语义一致），跑完才进评审。**事件序列逐字不变**（start / plan / agent_start / agent_done / agent_error / complete / pending_commit），因此 Java 网关与前端看板零改动。
+  - **与方案的一处有意偏差**：分类节点没放进图里，留在入口（`app.py` 调 `intent.classify`）。因为 `/chat` 的单 Agent 路径前面还有记忆意图、目标变更、计划生成三个旁路，且要吃 `req.context`——把 direct 分支搬进图等于把这套逻辑实现两遍，两处必然漂移。图只负责「多 Agent 协作」这一段。
+  - `src/orchestrator.py` 从 341 行降到 39 行，只保留门面：`SupervisorAgent.run(task, emit)` 与 `used_skills` 对外契约不变（三个入口 + `test_skills.py` 都不用改）。
+- **LLM 意图分类（`src/intent.py`，新增）**：原来只有「周报 / 总结+时间范围 / 数据驱动计划」三类魔法词才升级编排，典型复杂任务被 coach 硬答。现在由一次轻量 LLM 调用输出 `{type, reason, suggested_agents}`；**规则函数保留为兜底**（mock 模式 / 调用失败 / JSON 解析失败 / 产出非法类型），所以「无 key 也能跑通」这条约束不变，`app._needs_orchestration` 也保留为规则别名（意图回归测试入口）。安全取向：分类失败一律保守回退——宁可少拆一次，也不把普通问答升级成 20 秒编排。
+- **拆解去偏 + 依赖校验（P0-3）**：`_PLAN_PROMPT` 删掉「需要资料派 searcher、需要分析派 analyst、出计划派 planner」的固定管线暗示，改为按任务类型举例（伤病 → clinician+expert+planner；跨期对比 → 两次 analyst 各取一期 + 综合）；`_plan()` 里「命中健身域关键词就返回单步」的短路删掉（它会让 LLM 拆解永不执行）；`_fallback_plan()` 按伤病/汇报/计划分档，不再一律硬编码 searcher→analyst→planner。**新增 `validate_steps()`**：指向不存在步骤的 `@s9` 引用清除、该用上游产出却没写引用时自动补 `@s1`——修掉「LLM 漏引 → planner 拿不到上游产出 → 生成看起来完整实际缺料的报告，且丢失是静默的」这个缝隙。
+- **新增测试 23 条**：`tests/test_graph.py`（16）覆盖事件序列契约、逐步派发、失败继续、暂存附注、评审重写只做一次、非 planner 不重写、依赖校验四态、兜底模板分档；`tests/test_intent.py` 的 `TestClassify`（7）覆盖 mock 回退、显式编排、JSON 解析、markdown 包裹、垃圾输出回退、调用异常回退、规则别名仍在。首次运行暴露了一个测试卫生问题：评审节点会真的打 LLM（38s + 触发真实重写导致断言不确定）→ 加 autouse 夹具把 `get_agent` 打桩，降到 0.4s。
+
+**实机验证（真实 LLM，`/chat` 自动分流，8/8 符合预期）**
+
+| 用例 | 迁移前 | 迁移后 |
+| --- | --- | --- |
+| 膝盖疼，分析是不是深蹲姿势问题，给康复方案 | coach 一人硬答 | ✅ 编排 `clinician + expert + planner`（33.8s，13 事件） |
+| 对比上个月和这个月的跑步数据 | coach 一人硬答 | ✅ 编排 `analyst + analyst + writer`（17.2s，11 事件；产出还如实指出「两期数据完全相同」） |
+| 备战半马，查最新方法，结合我的水平排8周计划 | coach 一人硬答 | ✅ 编排 `searcher + analyst + planner`（33.4s） |
+| 帮我生成周报 | 编排但产出错 | ✅ 编排 `analyst + planner`，产出为周报骨架（22.3s） |
+| 怎么练胸 / 总结一下卧推要点 / 卧推要点 | 单 Agent | ✅ 仍单 Agent coach（4.7~5.3s，未被误升级） |
+| 周报一般包含什么内容 | 单 Agent | ✅ 仍单 Agent（5.6s） |
+
+> 两个已知问题如实记录（本轮未动）：① `searcher` 返回的检索结果质量差（实测两次都是搜索引擎首页 / 词义漂移内容），planner 只能「不引用垃圾来源」并如实说明——属方案 P1-2 范畴；② 编排路径耗时 17~34s，因为拆解 + 多步 + 评审都是串行 LLM 调用。
+
+**依赖与启动方式变更（重要）**：agent-service 不再是「零依赖」，改用项目专属 venv（`agent-service/.venv`，已 gitignore）装 `langgraph 1.2.11` + `langgraph-checkpoint-sqlite 3.1.1`（后者为 P2 的 checkpointer/interrupt 预留）。`start-all.bat` 的 agent-service 行改指向 `.venv\Scripts\python.exe`；README 快速开始同步。
+
+**方案里未做的部分（P1/P2）**：评审三层加固（规则检查 / 换模型评审 / 结构化清单）、SQLite FTS5 + 向量混合召回、教练人格自进化通道、暂存区迁到 interrupt、记忆去重——均留给后续。另外方案文档写「现有 90 个 pytest 用例」，实际当时已是 104。
+
 ### 2026-09-14 planner 产出类型切换：修掉「要周报却给计划」
 - **问题**：编排路径里要「周报」，产出标题却是「你的训练计划（修正版）」——**要周报给计划**。根因是一条链：`_fallback_plan` 把周报拆成 `searcher + analyst + planner` → `planner_agent` 的提示词**写死「生成一份训练计划」** → `_synthesize`「最后一步是 planner 就直接采用其产出」。更麻烦的是 `_critic` 的重写路径调的是同一个写死提示词，**评审就算正确指出「用户要的是周报」也救不回来**；
 - **修法**（`f86fbaa`）：`planner_agent` 改为产出类型可切换——新增 `deliverable_of(task)` 判定 `WEEKLY` / `PLAN`，两套骨架各自独立（周报＝本期概览 / 数据解读 / 问题诊断 / 下周建议；计划骨架保持原样），`_build_plan_prompt` 更名 `_build_prompt(user_msg, kind)`；`orchestrator._dispatch` 与 `_critic` 都补传 `ctx["task"]`——否则被 `@s1`/`@s2` 拼进来的前序产出（含「计划」字样）会把周报带偏，重写路径更是完全取不到「周报」字样；
