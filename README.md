@@ -18,8 +18,9 @@
    协作全程通过 **SSE 实时推送**到前端看板：拆解了哪几步、谁在跑、谁失败、谁产出，全部**肉眼可见**。
 2. **子 Agent 独立工作空间**——写库子 Agent（recorder）解析结果先进**暂存区**，主循环结束发 `pending_commit`  
    事件，前端确认后才 `/commit` 落库。图片导入同样先暂存（顺带修复「导入即入库」的 P0-3 回归）。
-3. **失败门控**——子 Agent 空返回/空串兜底文案（哨兵）→ 判该节点失败（`agent_error`）、跳过继续，  
-   绝不把模型废话当产出喂给下一步；综合阶段空/异常自动降级为「如实汇总各节点真实产出」。
+3. **失败门控 + 评审三层**——子 Agent 空返回/空串兜底文案（哨兵）→ 判该节点失败（`agent_error`）、跳过继续，  
+   绝不把模型废话当产出喂给下一步；综合阶段空/异常自动降级为「如实汇总各节点真实产出」。  
+   收口前还有一道`reviewer`复核：**规则检查先行**（机械缺陷直接判不过，不花 token）+ **结构化清单逐项判定** + **可换模型评审**，未消化的意见附进最终产出。
 4. **依赖链 `@s1` 引用**——LLM 拆解时若判断某步需要前序结果，在 input 里写 `@s2`，执行时代码替换成  
    前序节点真实产出（截断 400 字），子 Agent 成果在代码层串起来，不靠模型"记得"。
 5. **本地隐私优先**——训练截图走**本地 OCR**，图片永不离开本机，解析后先暂存、确认后结构化落库。
@@ -38,7 +39,7 @@
       start → plan(LLM 拆解→JSON steps；失败→按任务类型分档的代码兜底)
            → validate(依赖校验：@sN 漏引自动补、无效引用清除)
            → dispatch ⇄ dispatch（逐节点：替换@s1→调子Agent→空/哨兵判失败→agent_done|agent_error）
-           → review(PASS/ISSUES) ──ISSUES 且被评节点是 planner──→ rewrite(仅重写一次) → synthesize
+           → review(三层：规则检查→换模型评审→结构化清单) ──ISSUES 且被评节点是 planner──→ rewrite(仅重写一次) → synthesize
            → synthesize(单步直接用；最后成功步是 planner 用其产出；否则主 Agent 亲自 LLM 综合)
            → complete(output, final) → 若有暂存 → pending_commit(count, records)
   ↓ 子 Agent 独立执行 —— 上下文隔离（技能按主理 Agent 门控注入 `match_skills_for`：未声明 owner 全开放 / 同名才注入 / coach 例外吸收 clinician、expert；无对话历史 / 记忆按需召回 Top5；
@@ -53,7 +54,11 @@
 - **生成型（LLM + 受控注入）**：`searcher`(联网搜索 + 诚实降级)、`expert`(知识问答 + 用户基线注入)、  
   `planner`(周报/计划综合，强制全量注入用户画像)、`memory`(长期记忆)、`scheduler`(日程提醒)、  
   `writer`(文案写作)、`general`(兜底)；
-- 另有 `reviewer`(评审 Agent，PASS/ISSUES 协议) 供编排收口前复核；  
+- 另有 `reviewer`(评审 Agent，PASS/ISSUES 协议) 供编排收口前复核——**评审三层加固**：
+  ① 规则检查（`review_rules.py`，纯代码）把空产出/空串哨兵/降级文本/过短直接判不过，省掉一次 LLM 调用；
+  ② 评审按**五维结构化清单**逐项给出 `[OK]`/`[NG]`，而不是开放式"看看行不行"；
+  ③ 配 `REVIEW_MODEL` 可让评审走**另一套模型**（消除同模型自评的盲区共享与自我偏好），
+  未配置则回退同模型并在事件里如实标注 `reviewer_model`。非 planner 步骤的评审意见不再丢弃，会传给综合节点供修正或标注；  
   **`coach`(谭成义人格教练) 是独立入口而非别名**——健身域问题统一由它单 Agent 直答。
 - 保留旧别名：`research`→searcher、`posture`→clinician、`memorist`→memory。
 - 编排触发：`src/intent.py` 的 LLM 分类判定「单 Agent 直答 / 数据操作 / 多 Agent 编排」——需要「查资料 + 算数据 + 出成品」两件以上、跨期对比、或要周报/阶段总结/排期计划成品时才编排；记录类与健身域问答不进图（分类失败或 mock 模式退回原关键词规则，宁可少拆一次也不误升级）。
@@ -85,12 +90,13 @@ sport-agent-fullstack/
 │   ├── requirements.txt / requirements-dev.txt / requirements-ocr.txt
 │   ├── .env            # 含 LLM_API_KEY（已被根目录 .gitignore 排除，切勿提交）
 │   ├── data/           # 记忆与训练记录（自动生成）
-│   ├── tests/          # pytest 127 条：解析 / 意图(LLM分类+规则兜底) / 编排图 / 分析 / 计划(质量门+产出类型) / 技能 / 存储 / HTTP 鉴权
+│   ├── tests/          # pytest 147 条：解析 / 意图(LLM分类+规则兜底) / 编排图 / 评审规则 / 分析 / 计划(质量门+产出类型) / 技能 / 存储 / HTTP 鉴权
 │   ├── skills/         # 4 个可插拔教练技能（SKILL.md，按触发词动态挂载）
 │   ├── .venv/          # 项目专属虚拟环境（LangGraph 依赖，不入库）
 │   ├── _dump_prompt.py # 诊断工具：打印任意输入真正发给 LLM 的完整提示词（4 层拼装结果，排障/自查用）
 │   └── src/
 │       ├── graph.py             # LangGraph StateGraph 编排图：plan→validate→dispatch⇄→review→(rewrite)→synthesize
+│       ├── review_rules.py      # 评审第一层：规则检查（空/哨兵/降级/过短直接判不过，疑点提示不裁决）
 │       ├── intent.py            # 意图分类：LLM 结构化输出为主，原关键词规则 _needs_orchestration 为兜底
 │       ├── orchestrator.py      # SupervisorAgent 门面（对外契约 run(task, emit) 不变，内部委托 graph）
 │       ├── supervisor.py        # 单 Agent 关键词路由（健身域统一归 coach 直答）
@@ -203,7 +209,7 @@ start-all.bat
 - **CORS**：旧版 `src/server.py`（休眠的 stdlib HTTP 入口）从 `*` 收紧为仅回显本机 Origin，并走同一 token 校验。
 - **异常脱敏**：Agent 内部异常只记服务端日志，客户端拿通用文案；旧版 `.env` 上传限制等回归见 `CHANGELOG.md`。
 
-## 测试（127 个用例，`pytest tests/` 全绿）
+## 测试（147 个用例，`pytest tests/` 全绿）
 
 ```bash
 cd agent-service
@@ -211,13 +217,14 @@ cd agent-service
 .venv/Scripts/python -m pytest tests/ -q
 ```
 
-`tests/` 下 10 个文件，覆盖八层：
+`tests/` 下 11 个文件，覆盖九层：
 
 | 层 | 文件 | 覆盖内容 |
 | --- | --- | --- |
 | 解析 | `test_parsers.py` | 文件导入（GPX / CSV / OCR 规则兜底） |
 | 意图 | `test_intent.py` | 目标检测、规则兜底判定、**LLM 分类（JSON 解析 / 垃圾输出回退 / 显式编排）**、coach 意图分流（「要点/技巧/怎么做」不被误判成查数据） |
-| 编排图 | `test_graph.py` | **事件序列契约（前端/网关依赖）**、逐步派发与失败继续、`@sN` 依赖校验（补引 / 清无效引用）、评审重写只做一次、兜底模板分档 |
+| 编排图 | `test_graph.py` | **事件序列契约（前端/网关依赖）**、逐步派发与失败继续、`@sN` 依赖校验（补引 / 清无效引用）、评审三层接线（规则短路 / 意见传到综合）、评审重写只做一次、兜底模板分档 |
+| 评审 | `test_review_rules.py` | 规则层判据边界（只有空 / 哨兵 / 降级 / 过短判 blocking，缺段落与数字无出处**只提示不裁决**）、`format_issues` 与评审闸门协议一致 |
 | 分析 | `test_analyze.py` | 心率区间 / 负荷 / 力量趋势 |
 | 计划 | `test_plan_store.py` · `test_plan_guard.py` · `test_planner_prompt.py` | 流转与并发、写入点质量门（拦降级文本）、planner 产出类型（周报 vs 计划） |
 | 技能 | `test_skills.py` | 三级渐进加载 / 触发词去重 / 主理 Agent 门控 |
