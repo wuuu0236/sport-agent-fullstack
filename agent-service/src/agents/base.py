@@ -47,7 +47,10 @@ class BaseAgent:
             system = system + "\n\n" + skill_block(hits)
         # 记忆注入：子 Agent 走按需召回(recall_mode="recall")，主 Agent 走全量快照
         if ctx.get("recall_mode") == "recall":
-            mem_hits = memory.recall_relevant(user_msg, limit=5)
+            # 召回 query 用**原始用户任务**，不用 user_msg：后者是编排层/上游拼出来的
+            # 指令文本（形如「用户需求：…\n\n待评审内容：…」），掺着大量与用户无关的
+            # 噪声，拿它去检索会把召回带偏（旧实现就是拿 user_msg，实测基本召不回东西）。
+            mem_hits = memory.recall_relevant(ctx.get("task") or user_msg, limit=5)
             if mem_hits:
                 system = (
                     system

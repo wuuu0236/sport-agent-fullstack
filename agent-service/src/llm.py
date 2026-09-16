@@ -107,6 +107,42 @@ def _mock_chat(messages):
     )
 
 
+def embed_many(texts) -> list:
+    """批量取文本向量（OpenAI 兼容 /embeddings）。返回与输入等长的列表，
+    失败或未配置时**每个位置都是 None**（调用方据此退回纯关键词召回）。
+
+    为什么用「返回 None 列表」而不是抛异常或返回空表：向量召回是本项目的
+    **可选增强**——DeepSeek 不提供 embedding 接口，未配 EMBED_API_KEY 是正常状态。
+    降级路径必须和成功路径一样好走，否则调用点会被 try/except 淹掉。
+    """
+    items = [texts] if isinstance(texts, str) else list(texts)
+    if not items:
+        return []
+    if not config.CONFIG.embed_enabled:
+        return [None] * len(items)
+    cfg = config.CONFIG
+    url = cfg.EMBED_BASE_URL.rstrip("/") + "/embeddings"
+    out: list = [None] * len(items)
+    try:
+        data = _post_json(url, {"model": cfg.EMBED_MODEL, "input": items},
+                          api_key=cfg.EMBED_API_KEY)
+        rows = data.get("data") or []
+        for row in rows:
+            idx = row.get("index")
+            vec = row.get("embedding")
+            if isinstance(idx, int) and 0 <= idx < len(out) and isinstance(vec, list):
+                out[idx] = [float(x) for x in vec]
+    except Exception:  # noqa: BLE001
+        # 网络/鉴权/配额问题一律降级：记忆写入不该因为向量服务不可用而失败
+        return [None] * len(items)
+    return out
+
+
+def embed_one(text: str):
+    """取单条文本向量；不可用时返回 None。"""
+    return embed_many([text])[0]
+
+
 def vision(prompt, image_b64, mime="image/png", model=None, max_tokens=1024):
     """多模态：图文一起发给支持视觉的模型（DeepSeek V4-Flash/Pro 原生支持）。
     image_b64: 图片 base64 字符串（不含 data URI 前缀）；mime: 如 image/png。

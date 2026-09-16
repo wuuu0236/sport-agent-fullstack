@@ -3,28 +3,20 @@
 从 coach 拆出：只负责「基于真实训练数据算数」，不做知识问答、不写记录。
 全部走确定性代码（sport_data），绝不编造数据——没记录就如实说没有。
 """
-import re
-
 from .base import BaseAgent
-from .. import config
+from .. import memory
 from ..sport_data import SportStore, hr_zone
 
 _STORE = SportStore()
 
 
 def user_max_hr():
-    """从 USER.md 基线取最大心率；否则 220-年龄；再否则默认 190。"""
-    try:
-        txt = config.CONFIG.USER_FILE.read_text(encoding="utf-8")
-    except Exception:
-        txt = ""
-    m = re.search(r"最大心率[：:\s]*(\d+)", txt)
-    if m:
-        return int(m.group(1))
-    m = re.search(r"年龄[：:\s]*(\d+)", txt)
-    if m:
-        return 220 - int(m.group(1))
-    return 190
+    """从 USER 记忆取最大心率基线；否则 220-年龄；再否则默认 190。
+
+    原先直接读 `USER.md` 文件再正则抓。迁到 SQLite 后该文件只是导出的只读视图，
+    所以收敛到 `memory.baseline_max_hr()`——与 coach 共用同一份实现。
+    """
+    return memory.baseline_max_hr()
 
 
 class AnalystAgent(BaseAgent):

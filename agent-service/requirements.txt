@@ -6,3 +6,6 @@ uvicorn[standard]>=0.27
 # langgraph 1.2.11 实测；langchain-core 是它的底层依赖，显式钉住便于复现
 langgraph>=1.0,<2.0
 langgraph-checkpoint-sqlite>=3.0,<4.0
+# 中文分词：记忆检索用（SQLite FTS5 的内置分词器对中文失效，必须自己喂切好的 token，
+# 实测数据见 src/memory.py 模块 docstring）
+jieba>=0.42

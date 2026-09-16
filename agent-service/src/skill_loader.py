@@ -267,12 +267,6 @@ def _find_skill_dir(name: str):
 
 
 def _recent_session(n: int = 12) -> list:
-    """读 session.json 最近 N 条，用于蒸馏时的背景上下文。"""
-    p = config.CONFIG.SESSION_FILE
-    if not p.exists():
-        return []
-    try:
-        d = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    return d.get("messages", [])[-n:]
+    """读最近 N 条会话，用于蒸馏时的背景上下文。"""
+    from . import memory          # 局部导入：避免 memory ↔ skill_loader 循环依赖
+    return memory.session_turns(max_n=n, skip_last=0)

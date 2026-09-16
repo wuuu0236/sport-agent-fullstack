@@ -1,7 +1,6 @@
 """专业教练 Agent：训练记录录入 + 心率/力量分析 + 结构化日志 + 周期化建议。"""
-import re
 from .base import BaseAgent
-from .. import config, llm
+from .. import config, llm, memory
 from ..sport_data import SportStore, hr_zone
 
 _STORE = SportStore()
@@ -12,18 +11,12 @@ _BODY_PARTS = ("胸", "背", "腿", "肩", "手臂", "胳膊", "二头", "三头
 
 
 def _user_max_hr():
-    """从 USER.md 基线取最大心率；否则 220-年龄；再否则默认 190。"""
-    try:
-        txt = config.CONFIG.USER_FILE.read_text(encoding="utf-8")
-    except Exception:
-        txt = ""
-    m = re.search(r"最大心率[：:\s]*(\d+)", txt)
-    if m:
-        return int(m.group(1))
-    m = re.search(r"年龄[：:\s]*(\d+)", txt)
-    if m:
-        return 220 - int(m.group(1))
-    return 190
+    """从 USER 记忆取最大心率基线；否则 220-年龄；再否则默认 190。
+
+    原先直接读 `USER.md` 文件再正则抓。迁到 SQLite 后该文件只是导出的只读视图，
+    所以收敛到 `memory.baseline_max_hr()`——顺带消掉与 analyst 的重复实现。
+    """
+    return memory.baseline_max_hr()
 
 
 class CoachAgent(BaseAgent):

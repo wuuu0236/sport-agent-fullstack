@@ -616,12 +616,9 @@ def _record_goal(goal: str) -> None:
     new_entry = f"当前训练目标：{goal}"
     if new_entry not in new_entries:
         new_entries.append(new_entry)
-    # 写回 USER.md 并刷新内存快照（与 memory 模块共用文件锁，防并发读改写互踩）
-    with memory.file_lock:
-        user_path = config.CONFIG.USER_FILE
-        user_path.parent.mkdir(parents=True, exist_ok=True)
-        user_path.write_text("\n§\n".join(new_entries), encoding="utf-8")
-    memory.load()
+    # 交给 memory 模块整套替换（SQLite 唯一真源）。旧实现是拿 file_lock 直接读改写
+    # USER.md——迁到 SQLite 后那个文件已不是真源，直写它会写进一个只读视图里。
+    memory.replace_all("user", new_entries)
 
 
 def _append_goal_prompt(text: str, goal: str) -> str:

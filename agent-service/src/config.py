@@ -33,6 +33,23 @@ class _Config:
     MEMORY_FILE = MEMORY_DIR / "MEMORY.md"    # 助理自己的笔记/约定/技巧
     SESSION_FILE = MEMORY_DIR / "session.json"  # 短期会话（最近 N 条）
 
+    # 记忆的**唯一真源**（2026-09-16 起，方案 P1-2）：条目与会话都进 SQLite。
+    # 上面三个文件退化为「写入后同步的只读人读视图」——不再被读取，只为方便肉眼看内容；
+    # 并发保护交给 SQLite 的 WAL 模式，不再需要手写文件锁。
+    MEMORY_DB = MEMORY_DIR / "memory.db"
+
+    # 记忆混合召回的向量侧（方案 P1-2 阶段二）：DeepSeek 不提供 embedding 接口，
+    # 默认留空即**纯 FTS5 关键词召回**；配了 key 才启用「关键词得分 + 余弦相似度」融合。
+    # 注意：留空不是错误状态，是设计好的降级路径（写入时也不会去算向量）。
+    EMBED_API_KEY = _env.get("EMBED_API_KEY", "")
+    EMBED_BASE_URL = _env.get("EMBED_BASE_URL", "https://api.siliconflow.cn/v1")
+    EMBED_MODEL = _env.get("EMBED_MODEL", "BAAI/bge-m3")
+
+    @property
+    def embed_enabled(self) -> bool:
+        """是否启用向量召回：需要 embedding 的 key（base_url/model 有默认值）。"""
+        return bool(self.EMBED_API_KEY)
+
     # HTTP 服务（PORT 可被环境变量覆盖，便于避开被占用的端口）
     HOST = os.environ.get("HOST") or _env.get("HOST", "127.0.0.1")
     PORT = int(os.environ.get("PORT") or _env.get("PORT", "8000"))
