@@ -5,8 +5,10 @@
 """
 import json
 import datetime
-import threading
+import sqlite3
 import uuid
+from contextlib import contextmanager
+
 from . import config
 
 # 心率 5 区模型（基于最大心率 HRmax 百分比）
@@ -27,26 +29,123 @@ def hr_zone(pct: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 暂存队列（模块级，跨实例共享）：训练记录先「暂存」再「确认提交」。
+# 暂存队列（SQLite，跨实例 / 跨重启共享）：训练记录先「暂存」再「确认提交」。
 # 这是 Supervisor 编排里子 Agent「独立工作空间（workspace:isolated）」的数据层实现：
 # recorder 等写库 Agent 只把解析结果放进暂存区，不直接污染真实训练库，
 # 由 Supervisor 综合后 /commit 统一落库（防解析误判，对应图片导入 P0-3 教训）。
 #
-# 并发安全（2026-08-19 修复）：
-#   · 所有对 _STAGED 的读写都走 _STAGED_LOCK（FastAPI 多线程下并发暂存/提交不丢不坏）；
-#   · 每条暂存记录带唯一 _staged_id：前端确认时按 id 精确清除自己的记录，
+# 为什么从「进程内 list + threading.Lock」迁到 SQLite（2026-09-16，方案 P2）：
+#   · **进程内 list 服务一重启就全丢**。「记录训练 → 看到待确认卡片 → 还没点确认就
+#     重启/更新服务」这条路径下，解析结果会无声消失，而本项目重启服务是常态。
+#   · 并发保护交给 SQLite 的 WAL，**手写 _STAGED_LOCK 拿掉**（与记忆层同一思路：
+#     靠人工记得加锁，漏一次就是竞态）。
+#   · 每条暂存记录仍带唯一 _staged_id：前端确认时按 id 精确清除自己的记录，
 #     不会把其他会话/请求的暂存一起清掉。
+# 范围提醒：训练记录本身（runs / strengths）仍是 data/sessions 下的 JSON，本次不动，
+#           只迁暂存队列——改动面越小越好验证。
 # ---------------------------------------------------------------------------
-_STAGED = []
-_STAGED_LOCK = threading.Lock()
+
+def _staged_db_path():
+    """暂存库路径。
+
+    **故意写成函数而非模块级常量**：路径若在 import 时按 MEMORY_DIR 算死，测试里
+    patch `config.CONFIG.MEMORY_DIR` 就隔离不掉它，会写进真实 `data/`
+    （记忆层的 `MEMORY_DB` 正是这个坑，测试必须额外 patch 一次）。每次调用现算，
+    与 `SportStore.__init__` 里 `self.dir` 的算法保持一致。
+    """
+    return config.CONFIG.MEMORY_DIR / "staged.db"
+
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS staged (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    staged_id  TEXT NOT NULL UNIQUE,
+    payload    TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"""
+
+
+@contextmanager
+def _staged_db():
+    """暂存库连接：WAL + busy_timeout。
+
+    pragma 顺序与异常容忍都有讲究（8 线程并发测试实测出来的）：
+    · `busy_timeout` 必须**先于** `journal_mode`——反过来时，多线程首次并发建库
+      那句 pragma 没有等待余量。
+    · 但光靠顺序不够：**`PRAGMA journal_mode=WAL` 需要独占访问，冲突时直接返回
+      SQLITE_BUSY 且不调用 busy handler**（busy_timeout 对它无效）。多线程同时首次
+      连接时，一个线程切成功了、其余立刻拿到 BUSY → 抛 `database is locked`。
+      所以这里必须容忍这个异常：库要么已经是 WAL，要么会被先到的那个线程切成 WAL，
+      结果都对，不该让调用方为此失败。
+    · 建表语句每次连接都跑一遍（`IF NOT EXISTS`，成本可忽略），省掉一个「是否已初始化」
+      的模块级标志位——那个标志位本身就是测试里常被忘掉重置的坑。
+    """
+    path = _staged_db_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    conn = sqlite3.connect(path, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass  # 并发首次建库时别人正在切 WAL；不吃 busy_timeout，容忍即可
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.executescript(_SCHEMA)
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _stage(rec: dict) -> dict:
+    """把一条记录放进暂存队列（不落训练库），返回带 _staged_id 的记录。"""
     rec = dict(rec)  # 拷贝，避免外部继续修改污染暂存内容
     rec["_staged_id"] = uuid.uuid4().hex
-    with _STAGED_LOCK:
-        _STAGED.append(rec)
+    with _staged_db() as conn:
+        conn.execute(
+            "INSERT INTO staged (staged_id, payload, created_at) VALUES (?, ?, ?)",
+            (rec["_staged_id"], json.dumps(rec, ensure_ascii=False),
+             datetime.datetime.now().isoformat(timespec="seconds")),
+        )
     return rec
+
+
+def staged_records() -> list:
+    """当前暂存队列快照，按入队顺序（供 Supervisor / 前端确认用）。"""
+    with _staged_db() as conn:
+        rows = conn.execute("SELECT payload FROM staged ORDER BY seq").fetchall()
+    return [json.loads(r["payload"]) for r in rows]
+
+
+def _pop_first_staged():
+    """取出队首记录并移除（FIFO）；队列为空返回 None。"""
+    with _staged_db() as conn:
+        row = conn.execute(
+            "SELECT seq, payload FROM staged ORDER BY seq LIMIT 1").fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM staged WHERE seq=?", (row["seq"],))
+        return json.loads(row["payload"])
+
+
+def _discard_staged(ids: list = None) -> int:
+    """清除暂存。ids=None 清空全部；传 _staged_id 列表时只清匹配项。返回清除条数。"""
+    with _staged_db() as conn:
+        if ids is None:
+            n = conn.execute("SELECT COUNT(*) FROM staged").fetchone()[0]
+            conn.execute("DELETE FROM staged")
+            return n
+        # 逐条删：待清 id 数量很小，不做动态 SQL 拼接（免参数个数上限与注入面）
+        n = 0
+        for sid in set(ids):
+            n += conn.execute(
+                "DELETE FROM staged WHERE staged_id=?", (sid,)).rowcount
+        return n
 
 
 class SportStore:
@@ -89,17 +188,15 @@ class SportStore:
 
     def staged(self) -> list:
         """当前暂存队列快照（供 Supervisor/前端确认用）。"""
-        with _STAGED_LOCK:
-            return list(_STAGED)
+        return staged_records()
 
     def commit_staged(self) -> int:
-        """确认提交：把暂存记录全部落库，返回条数。"""
+        """确认提交：把暂存记录按入队顺序全部落库，返回条数。"""
         n = 0
         while True:
-            with _STAGED_LOCK:
-                if not _STAGED:
-                    break
-                rec = _STAGED.pop(0)
+            rec = _pop_first_staged()
+            if rec is None:
+                break
             if rec.get("type") == "run":
                 self.add_run(rec["date"], rec.get("distance_km") or 0,
                              rec.get("duration_min") or 0, rec.get("avg_hr") or 0,
@@ -114,16 +211,7 @@ class SportStore:
     def discard_staged(self, ids: list = None) -> int:
         """清除暂存。ids=None 清空全部；传 _staged_id 列表时只清匹配项
         （前端确认的那批记录），不影响其他会话/请求的暂存。返回清除条数。"""
-        with _STAGED_LOCK:
-            if ids is None:
-                n = len(_STAGED)
-                _STAGED.clear()
-                return n
-            id_set = set(ids)
-            keep = [r for r in _STAGED if r.get("_staged_id") not in id_set]
-            n = len(_STAGED) - len(keep)
-            _STAGED[:] = keep
-            return n
+        return _discard_staged(ids)
 
     def _save(self, rec):
         # 微秒级时间戳：同一秒内多条记录（批量导入/连续提交）不会互相覆盖丢数据
