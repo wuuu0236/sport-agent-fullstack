@@ -40,13 +40,17 @@ def _log_usage(data: dict):
         pass
 
 
-def _post_json(url: str, payload: dict, timeout: int = 60) -> dict:
-    """带重试的 POST JSON，返回解析后的响应 dict。"""
+def _post_json(url: str, payload: dict, timeout: int = 60,
+               api_key: str | None = None) -> dict:
+    """带重试的 POST JSON，返回解析后的响应 dict。
+
+    api_key 可覆盖默认凭据：用于「换模型评审」这类需要第二个供应商的调用点。
+    """
     last_exc = None
     for attempt in range(_MAX_RETRIES + 1):
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
         req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", f"Bearer {config.CONFIG.LLM_API_KEY}")
+        req.add_header("Authorization", f"Bearer {api_key or config.CONFIG.LLM_API_KEY}")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
@@ -63,8 +67,12 @@ def _post_json(url: str, payload: dict, timeout: int = 60) -> dict:
     raise RuntimeError("LLM 接口请求失败（网络异常）")
 
 
-def chat(messages, model=None, temperature=0.7, max_tokens=2048, thinking="disabled"):
+def chat(messages, model=None, temperature=0.7, max_tokens=2048, thinking="disabled",
+         base_url=None, api_key=None):
     """messages: [{"role":"system"|"user"|"assistant", "content": "..."}]
+
+    base_url / api_key 可覆盖默认供应商：评审 Agent 用第二个厂商的模型做反方
+    （消除同模型自评偏差，见方案 P1-1）时走这两个参数。
 
     thinking：DeepSeek V4 思考模式开关（"disabled" / "enabled"），默认关闭。
     默认关闭的原因（2026-08-30 实测）：V4 默认 enabled + high 强度，链式推理会把
@@ -74,7 +82,7 @@ def chat(messages, model=None, temperature=0.7, max_tokens=2048, thinking="disab
     """
     if config.CONFIG.mock_mode:
         return _mock_chat(messages)
-    url = config.CONFIG.LLM_BASE_URL.rstrip("/") + "/chat/completions"
+    url = (base_url or config.CONFIG.LLM_BASE_URL).rstrip("/") + "/chat/completions"
     payload = {
         "model": model or config.CONFIG.LLM_MODEL,
         "messages": messages,
@@ -83,7 +91,7 @@ def chat(messages, model=None, temperature=0.7, max_tokens=2048, thinking="disab
         "thinking": {"type": thinking},
     }
     try:
-        data = _post_json(url, payload)
+        data = _post_json(url, payload, api_key=api_key)
         return data["choices"][0]["message"]["content"].strip()
     except Exception:  # noqa: BLE001
         return ("（LLM 暂时不可用，已降级）请稍后再试，或检查 .env 中的 "

@@ -73,15 +73,20 @@ class BaseAgent:
         if history:
             messages += history
         messages.append({"role": "user", "content": user_msg})
-        reply = llm.chat(messages)
+        # 供应商/模型可被 ctx 覆盖：评审 Agent 用第二个厂商的模型做反方时走这里
+        # （未配置则 None，行为与从前完全一致）。
+        override = {k: ctx.get(k) for k in ("model", "base_url", "api_key") if ctx.get(k)}
+        reply = llm.chat(messages, **override)
         # 空串兜底（执行门控）：模型偶发返回空时，绝不能把「什么都没说」抛给用户/下游。
         # 第一次空回复通常是长上下文/记忆注入导致的偶发问题，用极简 prompt 重试一次。
         if not (reply or "").strip():
+            # 重试也要带 override：否则配了 REVIEW_MODEL 的场景会在重试时悄悄退回
+            # 默认模型，把「换模型评审」无声降级成自评。
             messages_retry = [
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": user_msg},
             ]
-            reply = llm.chat(messages_retry)
+            reply = llm.chat(messages_retry, **override)
         if not (reply or "").strip():
             return ("（模型本次未生成内容）可以换个说法再问，或明确告诉我你想做什么："
                     "记录训练/分析数据/联网搜索/写文案。")

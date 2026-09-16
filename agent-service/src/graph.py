@@ -29,7 +29,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from . import config, llm, memory
+from . import config, llm, memory, review_rules
 from .agents import agent_catalog, get_agent
 from .skill_loader import match_skills_for
 from .sport_data import SportStore
@@ -71,6 +71,10 @@ class OrchestrationState(TypedDict, total=False):
     idx: int
     results: dict
     review: str
+    # 评审未通过、但被评步骤不是 planner（没有可重写的综合品）时的意见。
+    # 必须在这里声明：LangGraph 按 TypedDict 的字段建通道，没声明的键会被静默丢弃
+    # （实测踩过——节点 return 了 review_issues，synthesize 却永远读到空）。
+    review_issues: str
     used_skills: dict
     output: str
     filled_refs: list
@@ -230,27 +234,57 @@ def _build_graph(emit, backend=None):
         return {"results": results, "idx": i + 1, "used_skills": used}
 
     def review_node(state: OrchestrationState) -> dict:
-        """Generator-Critic：对最后一个成功产出评审。评审异常一律视为通过。"""
+        """Generator-Critic：对最后一个成功产出评审。评审异常一律视为通过。
+
+        评审三层（方案 P1-1）：
+        1. 规则检查先行（纯代码）：空/哨兵/降级/过短直接判不过，省掉一次 LLM 调用；
+           疑似编造的数字、缺段落作为「已知疑点」附进评审提示。
+        2. LLM 评审按结构化清单逐项判定（见 reviewer_agent 的 system_prompt）。
+        3. 评审方走 `REVIEW_MODEL`（若配置）——不同模型避免自评偏差。
+        """
         steps, results = state["steps"], state.get("results") or {}
+        task = state["task"]
         step, out = _last_success(steps, results)
         if not out:
-            return {"review": ""}
+            return {"review": "", "review_issues": ""}
+        # ---- 第一层：规则检查（不花 token，结论可复现）----
+        upstream = {sid: (r or {}).get("output")
+                    for sid, r in results.items()
+                    if (r or {}).get("output")}
+        report = review_rules.check(task, out, upstream)
         n = len(steps) + 1
+        override = config.CONFIG.review_llm
+        reviewer_model = override.get("model") or config.CONFIG.LLM_MODEL
         emit({"type": "agent_start", "agent": "reviewer", "step": n, "total": n})
-        try:
-            review = get_agent("reviewer").handle(
-                f"用户需求：{state['task']}\n\n待评审内容：\n{out}",
-                {"skills": [], "use_history": False, "recall_mode": "recall"})
+        if report["blocking"]:
+            review = review_rules.format_issues(report)
             emit({"type": "agent_done", "agent": "reviewer", "step": n, "total": n,
-                  "output": (review or "")[:200]})
-        except Exception as e:  # noqa: BLE001
-            emit({"type": "agent_error", "agent": "reviewer", "step": n, "total": n,
-                  "error": str(e)})
-            return {"review": ""}
-        # 只有「评审不过 + 被评节点是 planner」才值得重写
-        if not _review_failed(review) or (step or {}).get("agent") != "planner":
-            return {"review": ""}
-        return {"review": review}
+                  "output": review[:200], "reviewer_model": "规则检查",
+                  "rule_blocking": len(report["blocking"])})
+        else:
+            hint_block = ""
+            if report["hints"]:
+                hint_block = ("\n\n【规则检查疑点（请逐条回应）】\n"
+                              + "\n".join(f"- {h}" for h in report["hints"]))
+            try:
+                review = get_agent("reviewer").handle(
+                    f"用户需求：{task}\n\n待评审内容：\n{out}{hint_block}",
+                    {"skills": [], "use_history": False, "recall_mode": "recall",
+                     **override})
+                emit({"type": "agent_done", "agent": "reviewer", "step": n, "total": n,
+                      "output": (review or "")[:200],
+                      "reviewer_model": reviewer_model})
+            except Exception as e:  # noqa: BLE001
+                emit({"type": "agent_error", "agent": "reviewer", "step": n, "total": n,
+                      "error": str(e)})
+                return {"review": "", "review_issues": ""}
+        # 只有「评审不过 + 被评节点是 planner」才值得重写（planner 产出本是综合结果）。
+        # 非 planner 的 ISSUES 不丢弃——交给综合节点当「已知不可靠项」（第三层传递）。
+        if not _review_failed(review):
+            return {"review": "", "review_issues": ""}
+        if (step or {}).get("agent") != "planner":
+            return {"review": "", "review_issues": review}
+        return {"review": review, "review_issues": ""}
 
     def rewrite_node(state: OrchestrationState) -> dict:
         steps, results = state["steps"], dict(state.get("results") or {})
@@ -281,7 +315,10 @@ def _build_graph(emit, backend=None):
 
     def synthesize_node(state: OrchestrationState) -> dict:
         steps, results = state["steps"], state.get("results") or {}
-        final = store.synthesize(state["task"], steps, results)
+        # 第三层传递：非 planner 步骤的评审意见交给综合节点，让主 Agent 知道
+        # 哪一步的产出不可靠（原先这类 ISSUES 被记录后即丢弃）。
+        final = store.synthesize(state["task"], steps, results,
+                                 issues=state.get("review_issues") or "")
         # complete 事件携带最终输出 + final 标记（前端据此收尾渲染）
         emit({"type": "complete", "status": "ok" if final else "degraded",
               "output": final, "final": True})
@@ -367,17 +404,19 @@ class _GraphBackend:
         return out, step_skills
 
     # ---------- 综合（主 Agent 亲自收口）----------
-    def synthesize(self, task: str, plan: list, results: dict) -> str:
+    def synthesize(self, task: str, plan: list, results: dict, issues: str = "") -> str:
         if len(plan) == 1:
             r = results.get(plan[0]["id"])
-            return r["output"] if r and r.get("output") else "（子 Agent 未产出有效结果，请稍后重试。）"
+            if not (r and r.get("output")):
+                return "（子 Agent 未产出有效结果，请稍后重试。）"
+            return _annotate(r["output"], issues)
 
         # 多步：最后一个成功步骤若是 planner，其产出已综合 → 直接采用
         for step in reversed(plan):
             r = results.get(step["id"])
             if r and r.get("output"):
                 if step["agent"] == "planner":
-                    return r["output"]
+                    return _annotate(r["output"], issues)
                 break
 
         blocks, joined = [], []
@@ -401,10 +440,16 @@ class _GraphBackend:
                "请把它们综合成一份对用户直接可用的完整回答：结构清晰、口语化、"
                "如实引用真实产出；缺失的部分如实说明，不要编造。\n"
                f"用户画像（含体态/伤病/心率基线，务必结合，不可忽略）：\n{_profile}")
+        # 第三层传递：把评审未通过项交给主 Agent——它要么修正，要么明确标注，
+        # 但绝不能照抄（原先这类意见在评审节点记录后即被丢弃）。
+        issue_block = ""
+        if issues:
+            issue_block = ("\n\n【评审未通过项（请修正或如实标注，不要沿用其中的可疑数据）】\n"
+                           + issues)
         try:
             reply = llm.chat(
                 [{"role": "system", "content": sys},
-                 {"role": "user", "content": f"用户需求：{task}\n\n子 Agent 产出：\n{joined_short}"}],
+                 {"role": "user", "content": f"用户需求：{task}\n\n子 Agent 产出：\n{joined_short}{issue_block}"}],
                 temperature=0.4, max_tokens=1500,
             )
         except Exception:
@@ -435,6 +480,18 @@ def _review_failed(review: str) -> bool:
     if not s or _SENTINEL in s:
         return False
     return s.startswith("ISSUES")
+
+
+def _annotate(output: str, issues: str) -> str:
+    """把本轮未被消化的评审意见附在**直出**产出后面（评审三层之第三层）。
+
+    规则判不过、但被评步骤不是 planner 时没有可重写的综合品，评审意见原本到此
+    就丢了——用户拿到的是一份「已知有问题」的产出却毫不知情。附注让问题可见。
+    LLM 综合路径不调用本函数：那条路径把意见写进提示词，由主 Agent 自行修正或标注。
+    """
+    if not issues:
+        return output
+    return (output or "") + "\n\n---\n⚠️ 评审提示（本轮未修复，请谨慎参考）：\n" + issues
 
 
 def run_orchestration(task: str, emit=None, backend=None) -> tuple:

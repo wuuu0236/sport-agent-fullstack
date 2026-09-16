@@ -51,6 +51,27 @@ class _Config:
     # 与「DNS rebinding」，以及容器化后裸奔在局域网。
     AGENT_AUTH_TOKEN = _env.get("AGENT_AUTH_TOKEN", "")
 
+    # 评审用独立模型（方案 P1-1「换模型评审」）：同一模型既当生成方又当评审方，会有
+    # 盲区共享（A 不知道的 B 也不知道）、自我偏好（自己风格算"好"）、推理路径重合
+    # （沿同一条路验证得出同一结论）三类偏差。配了 REVIEW_MODEL 就让 reviewer 走
+    # 另一套模型/供应商；未配置则回退当前模型（行为与从前一致），并在 review 事件里
+    # 如实标注 reviewer_model，避免"以为换了模型其实没换"。
+    REVIEW_MODEL = _env.get("REVIEW_MODEL", "")
+    REVIEW_BASE_URL = _env.get("REVIEW_BASE_URL", "")
+    REVIEW_API_KEY = _env.get("REVIEW_API_KEY", "")
+
+    @property
+    def review_llm(self) -> dict:
+        """评审调用的覆盖参数；未配置返回空 dict（= 用默认模型）。"""
+        if not self.REVIEW_MODEL:
+            return {}
+        out = {"model": self.REVIEW_MODEL}
+        if self.REVIEW_BASE_URL:
+            out["base_url"] = self.REVIEW_BASE_URL
+        if self.REVIEW_API_KEY:
+            out["api_key"] = self.REVIEW_API_KEY
+        return out
+
     @property
     def mock_mode(self) -> bool:
         return not bool(self.LLM_API_KEY)

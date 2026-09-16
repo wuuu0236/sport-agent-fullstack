@@ -13,14 +13,21 @@ import pytest
 from src import graph as graph_mod
 from src.graph import _GraphBackend, _review_failed, run_orchestration, validate_steps
 
+# 打桩产出：必须**够长且含必备段落**，否则会被评审第一层（规则检查）判为
+# 「过短/缺段落」，用例就测不到第二、三层的接线的了。真实子 Agent 产出只会更长。
+STUB_OUT = ("本周训练概览：共完成 4 次训练，累计跑量 23.5 km，平均配速 5:42 分/km，"
+            "力量训练 2 次。数据显示跑量比上周增加 12%，问题在于周三强度课配速掉到 6:10。"
+            "建议下周把间歇课挪到周二，下周目标跑量 26 km。")
+
 
 class StubBackend:
     """替换真实副作用（拆解/派发/综合），让图结构本身可测。"""
 
-    def __init__(self, steps, fail_on=(), review=""):
+    def __init__(self, steps, fail_on=(), review="", output=None):
         self.steps = steps
         self.fail_on = set(fail_on)
         self.review = review
+        self.output = output
         self.dispatched = []
 
     def plan(self, task):
@@ -30,11 +37,12 @@ class StubBackend:
         self.dispatched.append({"agent": name, "input": inp})
         if name in self.fail_on:
             raise ValueError(f"{name} 返回空输出")
-        return f"{name}的真实产出", []
+        return (self.output if self.output is not None else f"{name}：{STUB_OUT}"), []
 
-    def synthesize(self, task, plan, results):
+    def synthesize(self, task, plan, results, issues=""):
         parts = [r["output"] for _, r in sorted(results.items()) if r.get("output")]
-        return "综合：" + " | ".join(parts)
+        out = "综合：" + " | ".join(parts)
+        return out + f"\n[issues]{issues}" if issues else out
 
 
 @pytest.fixture(autouse=True)
@@ -168,6 +176,87 @@ class TestReviewGate:
                             lambda n: reviewer if n == "reviewer" else other)
         _run(_steps("analyst", "planner"))
         assert other.calls == 0
+
+
+# ------------------------------------------------- 2b. 评审三层（方案 P1-1）
+
+
+class TestReviewLayers:
+    def test_rule_blocking_skips_llm_review(self, monkeypatch):
+        """第一层：规则判不过时不调 LLM 评审（省一次调用，结论可复现）。"""
+        reviewer = _FakeAgent("PASS")
+        other = _FakeAgent("不该被调用")
+        monkeypatch.setattr(graph_mod, "get_agent",
+                            lambda n: reviewer if n == "reviewer" else other)
+        steps = _steps("analyst")
+        backend = StubBackend(steps, output="太短")
+        out, _u, events, _b = _run(steps, backend)
+        assert reviewer.calls == 0                     # 规则层短路了 LLM
+        assert events[-1]["final"] is True
+        # 第三层：非 planner 步骤的评审意见必须活着传到综合节点（桩后端把它回显出来）
+        assert "ISSUES（规则检查）" in out and "过短" in out
+
+    def test_rule_pass_falls_through_to_llm(self, monkeypatch):
+        """规则层放行 → 仍走 LLM 评审（且打上实际使用的评审模型名）。"""
+        reviewer = _FakeAgent("PASS 没问题")
+        monkeypatch.setattr(graph_mod, "get_agent",
+                            lambda n: reviewer if n == "reviewer" else _FakeAgent("x"))
+        _out, _u, events, _b = _run(_steps("analyst", "planner"))
+        assert reviewer.calls == 1
+        rev = [e for e in events if e.get("agent") == "reviewer"][-1]
+        assert rev["reviewer_model"]          # 事件里带评审模型，便于排查
+
+    def test_planner_issues_not_left_in_review_issues(self, monkeypatch):
+        """planner 的情报靠重写消化，不该再进 synthesize 的「已知不可靠项」。"""
+        reviewer = _FakeAgent("ISSUES: 缺数据引用")
+        monkeypatch.setattr(graph_mod, "get_agent",
+                            lambda n: reviewer if n == "reviewer" else _FakeAgent("重写后的周报"))
+        out, _u, _e, _b = _run(_steps("analyst", "planner"))
+        assert "ISSUES" not in out                     # 已重写，不再把意见透给综合
+
+
+class TestSynthesizeIssues:
+    def _patch_llm(self, monkeypatch, captured):
+        def fake_chat(messages, **kw):
+            captured["messages"] = messages
+            return "主 Agent 综合结果"
+        monkeypatch.setattr(graph_mod.llm, "chat", fake_chat)
+        monkeypatch.setattr(graph_mod.memory, "load", lambda: None)
+        monkeypatch.setattr(graph_mod.memory, "list_store", lambda k: [])
+        monkeypatch.setattr(type(graph_mod.config.CONFIG), "mock_mode",
+                            property(lambda self: False))
+
+    def test_issues_reach_synthesis_prompt(self, monkeypatch):
+        captured = {}
+        self._patch_llm(monkeypatch, captured)
+        plan = _steps("analyst", "searcher", "writer")
+        results = {s["id"]: {"agent": s["agent"], "output": STUB_OUT} for s in plan}
+        out = _GraphBackend().synthesize("帮我生成周报", plan, results,
+                                         issues="ISSUES: 数字待核对 23.5km")
+        assert out == "主 Agent 综合结果"
+        blob = captured["messages"][1]["content"]
+        assert "评审未通过项" in blob and "数字待核对" in blob
+
+    def test_no_issues_keeps_prompt_clean(self, monkeypatch):
+        captured = {}
+        self._patch_llm(monkeypatch, captured)
+        plan = _steps("analyst", "searcher", "writer")
+        results = {s["id"]: {"agent": s["agent"], "output": STUB_OUT} for s in plan}
+        _GraphBackend().synthesize("帮我生成周报", plan, results)
+        assert "评审未通过项" not in captured["messages"][1]["content"]
+
+    def test_direct_return_annotated_with_issues(self):
+        """直出路径（单步 / planner 产出采用）不经过 LLM，意见要附注在产出后面。"""
+        plan = _steps("analyst")
+        results = {plan[0]["id"]: {"agent": "analyst", "output": STUB_OUT}}
+        out = _GraphBackend().synthesize("看看我的数据", plan, results,
+                                         issues="ISSUES: 数字待核对 88km")
+        assert STUB_OUT in out and "评审提示" in out and "88km" in out
+
+    def test_direct_return_clean_without_issues(self):
+        plan = _steps("planner")
+        results = {plan[0]["id"]: {"agent": "planner", "output": STUB_OUT}}
+        assert _GraphBackend().synthesize("排个计划", plan, results) == STUB_OUT
 
 
 # ---------------------------------------------------------------- 3. 依赖校验
