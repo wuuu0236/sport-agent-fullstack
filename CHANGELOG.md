@@ -3,6 +3,25 @@
 > 本文件由 README 拆出（2026-09-15）：README 只保留项目介绍 / 功能 / 架构 / 快速开始等当前状态，
 > 按时间的迭代记录统一放这里。
 
+### 2026-09-16 暂存队列迁 SQLite（方案 P2，按永健拍板的口径实施）——测试 182 → **197 passed**
+
+**为什么没照方案原文做**：方案写的是「`_STAGED` 队列替换为 `interrupt_before`」。评估后确认**替换不了**，原因四条：① 编排图是无 checkpointer 的 `g.compile()`，interrupt/resume 必须新增检查点并把 `thread_id` 接进 config；② `_STAGED` 的写入者不只在图里——`app.py:_stage_import_data`（图片导入）**根本不在任何图中**，所以 `_STAGED` 删不掉，照做只会变成**两套机制并存**；③ 用户确认之后没有任何图内工作，resume 只是结束图，interrupt 只增加检查点与 thread 映射、**行为不变**；④ 会动 `/chat` 响应契约与前端 `useAgentChat.ts` 对 `pending_commit` 的渲染（外部契约）。
+**真正的现状弱点是另一件事**：`_STAGED` 是**进程内全局 list，服务一重启待确认记录就全丢**——而本项目重启服务是常态。所以改成**把暂存队列落 SQLite**（与 P2-1「手写锁 → WAL」同一思路，改动面更小、风险更低）。
+
+**改了什么**
+- 新增 `data/staged.db`（SQLite + WAL），表 `staged(seq AUTOINCREMENT, staged_id UNIQUE, payload, created_at)`；`seq` 保证 FIFO，`staged_id` 维持「按 id 精确清除自己的记录」这一 P0 语义。
+- **手写 `_STAGED_LOCK` 与模块级 `_STAGED` 列表删除**，并发交给 WAL。公开 API（`stage_run/stage_strength/staged/commit_staged/discard_staged`）签名与语义完全不变，调用点零改动。
+- 训练记录本身（`runs`/`strengths`，仍是 `data/sessions` 下的 JSON）**本次不动**——只迁暂存队列，便于验证。
+
+**踩到并修掉的并发坑（8 线程测试逼出来的）**
+`PRAGMA journal_mode=WAL` **需要独占访问，冲突时直接返回 SQLITE_BUSY 且不调用 busy handler**——也就是说「`busy_timeout` 先设」这个既有经验**对它无效**。8 线程首次并发建库时，一个线程切成功、其余立刻拿到 BUSY → 抛 `database is locked`。修法是容忍这个异常（库要么已是 WAL，要么会被先到的线程切成 WAL，结果都对），不把框架内部的锁竞争暴露给调用方。
+
+**验证**
+- 新增 `tests/test_staged_store.py` 15 条（跨进程耐用 / FIFO / 按 id 精确清除 / 极端用例 / 8 线程并发零丢失）。其中并发用例**在修复前实测变红**（`OperationalError('database is locked')`）——等于自带有效性验证。
+- **跨进程证明**：进程 A 暂存一条 → 进程 B（全新进程）读到同一条（旧实现在这里必然是 0）。
+- **真实服务证明**：经 `/chat` 让 recorder 暂存 → **重启 8001** → 待确认记录仍在（2 条）；训练库未被污染（`runs` 仍是 4 条）。
+- 暂存库路径 `_staged_db_path()` **故意写成函数而非模块常量**：写死的话测试 patch `MEMORY_DIR` 就隔离不掉它（`MEMORY_DB` 正是这个坑）。实测跑完测试真实 `data/` 无 `staged.db`。
+
 ### 2026-09-16 教练人格分层 + 知识层自进化通道（方案 P1-3）
 把谭成义的 prompt 显式拆成「代码里的人格层」与「`skills/` 里的知识层」，**并修掉两处让这条通道静默失效的断点**。测试 168 → **182 passed**。
 

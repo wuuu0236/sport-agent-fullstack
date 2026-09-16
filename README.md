@@ -17,7 +17,8 @@
    执行类子 Agent（记录解析 / 数据计算 / 康复知识库）以确定性代码为主，不依赖 LLM 自觉。  
    协作全程通过 **SSE 实时推送**到前端看板：拆解了哪几步、谁在跑、谁失败、谁产出，全部**肉眼可见**。
 2. **子 Agent 独立工作空间**——写库子 Agent（recorder）解析结果先进**暂存区**，主循环结束发 `pending_commit`  
-   事件，前端确认后才 `/commit` 落库。图片导入同样先暂存（顺带修复「导入即入库」的 P0-3 回归）。
+   事件，前端确认后才 `/commit` 落库。图片导入同样先暂存（顺带修复「导入即入库」的 P0-3 回归）。  
+   暂存区落 **SQLite（WAL）**：**服务重启后待确认记录仍在**（此前是进程内 list，重启即清零），并发保护也不再依赖手写锁。
 3. **失败门控 + 评审三层**——子 Agent 空返回/空串兜底文案（哨兵）→ 判该节点失败（`agent_error`）、跳过继续，  
    绝不把模型废话当产出喂给下一步；综合阶段空/异常自动降级为「如实汇总各节点真实产出」。  
    收口前还有一道`reviewer`复核：**规则检查先行**（机械缺陷直接判不过，不花 token）+ **结构化清单逐项判定** + **可换模型评审**，未消化的意见附进最终产出。
@@ -44,7 +45,7 @@
            → complete(output, final) → 若有暂存 → pending_commit(count, records)
   ↓ 子 Agent 独立执行 —— 上下文隔离（技能按主理 Agent 门控注入 `match_skills_for`：未声明 owner 全开放 / 同名才注入 / coach 例外吸收 clinician、expert；无对话历史 / 记忆按需召回 Top5；
      planner 例外：强制全量注入用户画像，防伤病限制被语义召回漏掉），只交产出字符串
-  ↓ 数据层 —— recorder 解析 → 暂存队列 _STAGED → 前端「确认入库」→ /commit → 落库
+  ↓ 数据层 —— recorder 解析 → 暂存队列（SQLite，WAL）→ 前端「确认入库」→ /commit → 落库
 ```
 
 **子 Agent 名录**（`agent-service/src/agents/`），按实现方式分两类：
@@ -90,8 +91,8 @@ sport-agent-fullstack/
 │   ├── app.py          # FastAPI: /chat /supervise(JSON 或 ?stream=1 SSE) /commit /import-image /agent/{name} /route /plan(|/plans) /plan/* /memory /sessions /health
 │   ├── requirements.txt / requirements-dev.txt / requirements-ocr.txt
 │   ├── .env            # 含 LLM_API_KEY（已被根目录 .gitignore 排除，切勿提交）
-│   ├── data/           # 记忆与训练记录（自动生成）
-│   ├── tests/          # pytest 182 条：解析 / 意图(LLM分类+规则兜底) / 编排图 / 评审规则 / 分析 / 计划(质量门+产出类型) / 技能 / 人格分层 / 存储 / 检索 / HTTP 鉴权
+│   ├── data/           # 记忆与训练记录（自动生成）；暂存队列在 staged.db（SQLite，抗重启）
+│   ├── tests/          # pytest 197 条：解析 / 意图(LLM分类+规则兜底) / 编排图 / 评审规则 / 分析 / 计划(质量门+产出类型) / 技能 / 人格分层 / 存储 / 检索 / 暂存 / HTTP 鉴权
 │   ├── skills/         # 4 个可插拔教练技能（SKILL.md，按触发词动态挂载）——即 coach 的「补充知识层」
 │   ├── .venv/          # 项目专属虚拟环境（LangGraph 依赖，不入库）
 │   ├── _dump_prompt.py # 诊断工具：打印任意输入真正发给 LLM 的完整提示词（4 层拼装结果，排障/自查用）
@@ -101,7 +102,7 @@ sport-agent-fullstack/
 │       ├── intent.py            # 意图分类：LLM 结构化输出为主，原关键词规则 _needs_orchestration 为兜底
 │       ├── orchestrator.py      # SupervisorAgent 门面（对外契约 run(task, emit) 不变，内部委托 graph）
 │       ├── supervisor.py        # 单 Agent 关键词路由（健身域统一归 coach 直答）
-│       ├── sport_data.py        # SportStore：暂存队列 _STAGED + 周聚合/环比/日负荷/ACWR 确定性计算
+│       ├── sport_data.py        # SportStore：暂存队列（SQLite+WAL，抗重启）+ 周聚合/环比/日负荷/ACWR 确定性计算
 │       ├── plan_store.py        # 计划库：pending 两段确认 / 切换 / 删除
 │       ├── skill_loader.py      # Skill 三级渐进加载 + 蒸馏 / patch（注册表版本号驱动目录缓存热更新）
 │       ├── memory.py            # 双存储记忆：SQLite 唯一真源 + WAL + jieba/FTS5 混合召回（向量侧可选）
@@ -210,7 +211,7 @@ start-all.bat
 - **CORS**：旧版 `src/server.py`（休眠的 stdlib HTTP 入口）从 `*` 收紧为仅回显本机 Origin，并走同一 token 校验。
 - **异常脱敏**：Agent 内部异常只记服务端日志，客户端拿通用文案；旧版 `.env` 上传限制等回归见 `CHANGELOG.md`。
 
-## 测试（182 个用例，`pytest tests/` 全绿）
+## 测试（197 个用例，`pytest tests/` 全绿）
 
 ```bash
 cd agent-service
@@ -218,7 +219,7 @@ cd agent-service
 .venv/Scripts/python -m pytest tests/ -q
 ```
 
-`tests/` 下 13 个文件，覆盖十一层：
+`tests/` 下 14 个文件，覆盖十二层：
 
 | 层 | 文件 | 覆盖内容 |
 | --- | --- | --- |
@@ -231,6 +232,7 @@ cd agent-service
 | 技能 | `test_skills.py` | 三级渐进加载 / 触发词去重 / 主理 Agent 门控 |
 | 人格分层 | `test_coach_persona.py` | **人格层不被自进化写入**（patch 技能后 `PERSONA_CORE` 字节不变）、知识层在对话路径与结构化路径（补建议）都被注入、`存技能` 后目录缓存热更新 |
 | 存储 | `test_memory.py` | 双存储读改写 + **WAL 并发（多线程 append 零丢失）** + 旧 Markdown/session.json 一次性迁移（幂等）+ 整套替换重建索引 |
+| 暂存 | `test_staged_store.py` | **跨进程/跨重启耐用**（新连接仍读到暂存记录）、FIFO 顺序、按 `_staged_id` 精确清除、8 线程并发暂存零丢失 |
 | 检索 | `test_memory_search.py` | **中文自然语言召回**（钉住旧实现「整句一个 token → 0 命中」的回归）、词/bigram 双索引、bm25 分列权重、向量侧降级与近重复合并 |
 | HTTP | `test_http_auth.py` | 鉴权中间件 + 异常脱敏 |
 
