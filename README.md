@@ -70,7 +70,7 @@
 | 前端        | Vue 3 + Vite（设计令牌体系 · **深/浅双主题** + 4 模块工作台 + 自研 SVG 图表 + SSE EventSource；多 Agent 协作走内联时间轴） |
 | 网关        | Spring Boot 3（薄转发：/api/chat、/api/import-image、/api/orchestrate、/api/commit） |
 | Agent 能力层 | Python + FastAPI 微服务 + **LangGraph StateGraph** 编排（plan → validate → dispatch → review → rewrite → synthesize）：10 个可派发子 Agent，另有 `reviewer` 评审节点与 `coach` 直答入口 |
-| 记忆        | 双存储 USER.md / MEMORY.md（冻结快照注入）+ Skill 三级渐进加载 + session 短期记忆                |
+| 记忆        | **SQLite 唯一真源（WAL 并发）** + 双存储（关于用户 / 助理笔记）+ **jieba + FTS5 混合召回** + 冻结快照注入；Markdown 仅作只读视图 + Skill 三级渐进加载                 |
 | 数据引擎      | SportStore 确定性计算：周聚合 / 周环比（缺口如实标注）/ 日负荷 / ACWR 急慢性负荷比（伤病风险）                 |
 | LLM       | DeepSeek `deepseek-v4-flash`（OpenAI 兼容接口，无 key 自动 mock 降级）                  |
 
@@ -103,7 +103,7 @@ sport-agent-fullstack/
 │       ├── sport_data.py        # SportStore：暂存队列 _STAGED + 周聚合/环比/日负荷/ACWR 确定性计算
 │       ├── plan_store.py        # 计划库：pending 两段确认 / 切换 / 删除
 │       ├── skill_loader.py      # Skill 三级渐进加载 + 蒸馏 / patch
-│       ├── memory.py            # 双存储记忆（文件锁并发保护）
+│       ├── memory.py            # 双存储记忆：SQLite 唯一真源 + WAL + jieba/FTS5 混合召回（向量侧可选）
 │       └── agents/              # 10 个可派发子 Agent + reviewer + coach + 注册表 agent_catalog
 │           ├── recorder_agent.py / analyst_agent.py / research_agent.py（类名 SearcherAgent）
 │           ├── posture_agent.py（类名 ClinicianAgent）/ expert_agent.py / planner_agent.py
@@ -209,7 +209,7 @@ start-all.bat
 - **CORS**：旧版 `src/server.py`（休眠的 stdlib HTTP 入口）从 `*` 收紧为仅回显本机 Origin，并走同一 token 校验。
 - **异常脱敏**：Agent 内部异常只记服务端日志，客户端拿通用文案；旧版 `.env` 上传限制等回归见 `CHANGELOG.md`。
 
-## 测试（147 个用例，`pytest tests/` 全绿）
+## 测试（168 个用例，`pytest tests/` 全绿）
 
 ```bash
 cd agent-service
@@ -217,7 +217,7 @@ cd agent-service
 .venv/Scripts/python -m pytest tests/ -q
 ```
 
-`tests/` 下 11 个文件，覆盖九层：
+`tests/` 下 12 个文件，覆盖十层：
 
 | 层 | 文件 | 覆盖内容 |
 | --- | --- | --- |
@@ -228,7 +228,8 @@ cd agent-service
 | 分析 | `test_analyze.py` | 心率区间 / 负荷 / 力量趋势 |
 | 计划 | `test_plan_store.py` · `test_plan_guard.py` · `test_planner_prompt.py` | 流转与并发、写入点质量门（拦降级文本）、planner 产出类型（周报 vs 计划） |
 | 技能 | `test_skills.py` | 三级渐进加载 / 触发词去重 / 主理 Agent 门控 |
-| 存储 | `test_memory.py` | 双存储读改写 + 文件锁并发（多线程 append 零丢失） |
+| 存储 | `test_memory.py` | 双存储读改写 + **WAL 并发（多线程 append 零丢失）** + 旧 Markdown/session.json 一次性迁移（幂等）+ 整套替换重建索引 |
+| 检索 | `test_memory_search.py` | **中文自然语言召回**（钉住旧实现「整句一个 token → 0 命中」的回归）、词/bigram 双索引、bm25 分列权重、向量侧降级与近重复合并 |
 | HTTP | `test_http_auth.py` | 鉴权中间件 + 异常脱敏 |
 
 LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-ocr.txt`。
@@ -263,19 +264,32 @@ LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-
 - ✅ 前端 → 后端 → Python Agent 单 Agent 对话、图片导入（本地 OCR + 解析 + 先暂存后落库）、健康检查。
 - ✅ 无 LLM key 时 mock 降级，三服务依旧跑通。
 
-## 记忆持久化（已修复并实测 ✅）
+## 记忆持久化（2026-09-16 迁 SQLite ✅）
 
-- **前端聊天持久化**：`Chat.vue` 聊天记录写入 `localStorage`，刷新/重开页面历史仍在。
-- **后端短期会话记忆**：`/chat` 路由补上 `memory.append_session`，每次对话落盘 `data/session.json`；
-  `BaseAgent._llm` 自动把最近 20 条会话注入上下文，多轮追问有记忆。
+- **唯一真源 `data/memory.db`（SQLite + WAL）**：条目与会话都进库，并发保护交给 SQLite 的 WAL 模式，
+  **不再需要手写文件锁**。`USER.md` / `MEMORY.md` 退化为「写入后同步的只读人读视图」——不再被读取，
+  只为方便肉眼看内容。
+- **一次性迁移**：首次建库自动导入旧的 `USER.md` / `MEMORY.md` / `session.json`（靠 meta 标记保证幂等，
+  用户删空记忆后重启不会被旧文件灌回来）。实测迁移 7 条画像 + 50 条会话历史，原文件保持不动。
+- **长期画像**：由「记住 / 记下 …」意图触发 `memory_agent` 调用 `remember()` 写入，跨会话常驻并注入
+  各 Agent 的 system prompt（真实 LLM 模式下自动解析落地；mock 模式仅提示、不写盘）。
+- **按需召回（2026-09-16 重写）**：`jieba` 分词 + `词/bigram` 双索引列 + FTS5 `bm25` 分列权重。
+  配 `EMBED_API_KEY` 后叠加向量余弦相似度融合，并对相似度 > 0.9 的条目**更新而非新增**。
+  - ⚠️ **旧实现的中文召回实际是坏的**：`[\w\u4e00-\u9fff]+` 里的 `\w` 本身就匹配 CJK，
+    整句被当成**一个 token**，再拿整句去条目里找子串 → 独立复核 **5 条记忆 × 14 个真实问句 = 0/14 命中**；
+    生产路径传入的还是合成 prompt，连子串退路也没有，`<memory-context>` 块**从不注入**。
+    重写后在真实 7 条画像上：**旧 1/8 → 新 8/8**。
+  - 中文 FTS5 的两个坑（实测）：内置 `unicode61` 对中文全 0 命中；`trigram` 只支持 ≥3 字符，
+    2 字词（膝盖/心率/卧推/增肌）全失效。所以索引列必须自己喂切好的 token。
+  - 未配 `EMBED_API_KEY` 是**默认正常状态**（DeepSeek 不提供 embedding），纯关键词召回照常工作。
 - **训练记录展示**：`GET /sessions`（agent-service）返回最近训练；前端经 Vite 代理 `/agent/sessions` 拉取，
-  在聊天页顶部展示「最近训练」卡片。**训练记录本体**持久化在 `data/sessions/*.json`。
-- **长期画像（USER.md / MEMORY.md）**：由「记住 / 记下 …」意图触发 `memory_agent` 调用 `remember()` 写入，
-  跨会话常驻并注入各 Agent 的 system prompt（真实 LLM 模式下自动解析落地；mock 模式仅提示、不写盘）。
+  在聊天页顶部展示「最近训练」卡片。**训练记录本体**持久化在 `data/sessions/*.json`（与记忆库分开）。
 
 ## 诚实说明（尚未完成）
 - Docker 部署仍不可用（缺 Dockerfile；需先补 `.dockerignore` 排除 .env 与 data/）
-- 长期记忆 USER.md 仍需「记住/记下」触发 + 真实 key 才落盘
+- 长期记忆仍需「记住/记下」触发 + 真实 key 才落盘（现写入 SQLite，不再是 USER.md）
+- 向量召回需自备 `EMBED_API_KEY`（DeepSeek 无 embedding 接口），未配置时只有关键词召回，
+  `膝盖`/`膝关节` 这类同义词字面不重合仍召不回
 - 子 Agent 的语义质量（答非所问/数据编错）尚无自动化评测，靠主 Agent 综合阶段人工兜底
 - 意图路由准确率尚未标注评测（计划：50 条真实消息跑混淆矩阵）
 
