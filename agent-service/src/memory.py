@@ -670,11 +670,26 @@ def session_turns(max_n: int = 20, skip_last: int = 1) -> list:
 
 
 def reset_long_term() -> None:
-    """清空双存储（演示/测试用）。会话与向量一并清掉，避免残留脏召回。"""
+    """重置**全部记忆**（演示/测试用）：长期记忆 + 会话历史 + 向量一并清掉。
+
+    为什么连会话一起清（2026-09-16 复查修正）：本函数是 `demo.py` 的「开演前重置」
+    入口，语义就是**重置演示数据**，而 docstring 一直写着「会话与向量一并清掉」，
+    实现却只删了 `entries` / `entries_fts`——会话表残留，上一轮演示的对话会被当成
+    历史上下文带进下一轮，演示不可重复。**注释与行为不一致本身就是坑**：读代码的人
+    会以为会话已经清了。
+
+    影响范围（调用前请确认你要的就是这些）：
+    · `entries` / `entries_fts`：user + memory 长期记忆（含向量列），
+      `USER.md` / `MEMORY.md` 只读视图同步清空；
+    · `session_messages`：会话历史；
+    · **不动** `meta`（迁移标记必须保留，否则删空记忆后重启，旧 Markdown 会被重新灌回来）；
+    · **不在范围内**：训练记录（`data/sessions/*.json`）、暂存队列（`data/staged.db`）。
+    """
     _ensure_schema()
     with _db() as conn:
         conn.execute("DELETE FROM entries")
         conn.execute("DELETE FROM entries_fts")
+        conn.execute("DELETE FROM session_messages")
         _export_markdown(conn)
     _store.load()
 

@@ -165,3 +165,98 @@ class TestConcurrency:
         rows = store.staged()
         assert len(rows) == 80
         assert len({r["note"] for r in rows}) == 80
+
+
+# --------------------------------- 确认侧：原子抢占，一条记录只落库一次（2026-09-16 复查）
+
+
+def _db_status(tmp_path, staged_id):
+    """直接查库拿 status——断言抢占状态本身，而不是绕开它的公开行为。"""
+    conn = sqlite3.connect(tmp_path / "staged.db")
+    try:
+        row = conn.execute("SELECT status FROM staged WHERE staged_id=?",
+                           (staged_id,)).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+class TestAtomicClaim:
+    def test_claim_marks_committing_and_is_exclusive(self, store, tmp_path):
+        """抢占是排他的：同一条记录只能被抢到一次（这是「不重复入库」的根据）。"""
+        from src.sport_data import _claim_first_staged
+        r = _stage_run(store)
+        first = _claim_first_staged()
+        assert first["_staged_id"] == r["_staged_id"]
+        assert _db_status(tmp_path, r["_staged_id"]) == "committing"
+        assert _claim_first_staged() is None      # 已抢占，抢不到第二次
+
+    def test_claim_skips_committing_and_takes_next(self, store):
+        """队首被抢占后，抢占方应继续拿到下一条（不能整批放弃）。"""
+        from src.sport_data import _claim_first_staged
+        _stage_run(store, note="第一条")
+        _stage_run(store, note="第二条")
+        assert _claim_first_staged()["note"] == "第一条"
+        assert _claim_first_staged()["note"] == "第二条"
+
+    def test_release_claim_makes_record_confirmable_again(self, store, tmp_path):
+        """落库失败要把抢占退回去，否则记录卡在 committing，用户点确认只会
+        得到「暂存区为空，无需提交」——记录还在却永远提交不掉。"""
+        r = _stage_run(store)
+        orig_dir = store.dir
+        blocker = tmp_path / "not_a_dir"
+        blocker.write_text("x", encoding="utf-8")
+        store.dir = blocker
+        with pytest.raises(IOError):
+            store.commit_staged()
+        assert _db_status(tmp_path, r["_staged_id"]) == "staged"   # 已退回
+        store.dir = orig_dir
+        assert store.commit_staged() == 1                          # 修好后能重试
+        assert len(store.runs()) == 1
+
+    def test_stale_claim_is_reclaimed(self, store, tmp_path):
+        """抢占方中途崩了（进程被杀）不能让记录永久卡死：超过租期自动收回。"""
+        import datetime
+        r = _stage_run(store)
+        old = (datetime.datetime.now() - datetime.timedelta(seconds=9999)
+               ).isoformat(timespec="seconds")
+        conn = sqlite3.connect(tmp_path / "staged.db")
+        try:
+            conn.execute("UPDATE staged SET status='committing', claimed_at=? "
+                         "WHERE staged_id=?", (old, r["_staged_id"]))
+            conn.commit()
+        finally:
+            conn.close()
+        assert store.commit_staged() == 1
+        assert len(store.runs()) == 1
+
+
+class TestConcurrentCommitNoDoubleInsert:
+    def test_parallel_commit_inserts_each_record_once(self, store):
+        """8 个请求同时确认同一批暂存 → 每条只落库一次，绝不重复。
+
+        老实现「读队首 → 写盘 → 删」：两个请求都会读到同一条队首，于是同一条记录
+        被写进训练库两次。现在只有抢到（UPDATE rowcount==1）的一方有资格写盘。
+        """
+        for i in range(5):
+            _stage_run(store, date=f"2026-08-0{i + 1}", note=f"n{i}")
+        results, errors = [], []
+        barrier = threading.Barrier(8)
+
+        def worker():
+            try:
+                barrier.wait(timeout=10)     # 尽量让 8 个线程同时进确认
+                results.append(store.commit_staged())
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"并发确认抛异常：{errors[:2]}"
+        assert sum(results) == 5             # 5 条记录合计只被确认 5 次
+        assert len(store.runs()) == 5        # 训练库里正好 5 条（重复入库会变 6+）
+        assert store.staged() == []

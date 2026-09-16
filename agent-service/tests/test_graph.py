@@ -259,6 +259,136 @@ class TestSynthesizeIssues:
         assert _GraphBackend().synthesize("排个计划", plan, results) == STUB_OUT
 
 
+# --------------------------------- 2c. 重写失败不得泄露坏产出（2026-09-16 复查）
+#
+# 病根是一条「三个节点接力丢信息」的链：
+#   review 判 planner 产出不过 → 走重写；重写失败 → 只保留原产出、**评审意见原地蒸发**
+#   （state["review"] 只服务重写节点，综合层不读）→ synthesize 看到最后一步是 planner
+#   就直出 → 用户拿到一份「已知有问题、且可能根本没生成出来」的成品，却毫无提示。
+
+
+def _patch_llm_synth(monkeypatch, captured):
+    """让 `_GraphBackend.synthesize` 的 LLM 综合分支可测（离线）。"""
+    def fake_chat(messages, **kw):
+        captured["messages"] = messages
+        return "主 Agent 综合结果"
+    monkeypatch.setattr(graph_mod.llm, "chat", fake_chat)
+    monkeypatch.setattr(graph_mod.memory, "load", lambda: None)
+    monkeypatch.setattr(graph_mod.memory, "list_store", lambda k: [])
+    monkeypatch.setattr(type(graph_mod.config.CONFIG), "mock_mode",
+                        property(lambda self: False))
+
+
+class TestRewriteFailureDoesNotLeak:
+    def test_failed_rewrite_passes_review_to_synthesize(self, monkeypatch):
+        """重写失败时评审意见必须继续传递（方案 A）。
+
+        老实现 `return {"results": results}`：产出留下、意见丢掉，于是综合层
+        拿到的是一份「评审判过没过」的成品 + 一句空 issues。
+        注意图里的 `get_agent` 只被评审节点与重写节点调用（派发走的是打桩后端）。
+        """
+        reviewer = _FakeAgent("ISSUES: 缺数据引用")
+        rewrite_fail = _FakeAgent("（模型本次未生成内容）")
+        monkeypatch.setattr(graph_mod, "get_agent",
+                            lambda n: reviewer if n == "reviewer" else rewrite_fail)
+        out, _u, events, _b = _run(_steps("analyst", "planner"))
+        assert rewrite_fail.calls == 1                   # 重写确实跑了，且只跑一次
+        # 桩后端把 issues 回显进产出，据此确认意见真的到了综合层
+        assert "ISSUES" in out and "缺数据引用" in out
+        assert any(e["type"] == "agent_error" and e.get("agent") == "planner"
+                   for e in events)
+
+    def test_undeliverable_planner_output_not_returned_directly(self, monkeypatch):
+        """方案 B：机械缺陷产出不得被综合层直出，改走汇总兜底。"""
+        captured = {}
+        _patch_llm_synth(monkeypatch, captured)
+        plan = _steps("analyst", "planner")
+        results = {
+            plan[0]["id"]: {"agent": "analyst", "output": STUB_OUT},
+            plan[1]["id"]: {"agent": "planner", "output": "（模型本次未生成内容）"},
+        }
+        out = _GraphBackend().synthesize("帮我生成周报", plan, results)
+        assert out == "主 Agent 综合结果"                 # 走了 LLM 综合，不是直出
+        blob = captured["messages"][1]["content"]
+        assert STUB_OUT in blob                          # 有效产出喂给了综合
+        assert "模型本次未生成内容" not in blob            # 坏产出没有被喂进去
+
+    def test_undeliverable_single_output_reports_honestly(self):
+        """单步产出是降级文案时，报「未产出有效结果」而不是把降级文案直出。"""
+        plan = _steps("planner")
+        results = {plan[0]["id"]: {"agent": "planner",
+                                   "output": "（LLM 暂时不可用，已降级）请稍后再试"}}
+        out = _GraphBackend().synthesize("排个计划", plan, results)
+        assert "未产出有效结果" in out
+        assert "暂时不可用" not in out
+
+    def test_deliverable_planner_output_still_direct(self):
+        """反向锁定：正常 planner 产出仍直出（别把兜底改成了永远多花一次 LLM）。"""
+        plan = _steps("planner")
+        results = {plan[0]["id"]: {"agent": "planner", "output": STUB_OUT}}
+        assert _GraphBackend().synthesize("排个计划", plan, results) == STUB_OUT
+
+
+# ------------------------------- 2d. 区分「评审失败」与「评审通过」（2026-09-16 复查）
+#
+# 评审模型不可用时 `llm.chat` 会吞异常、返回降级文案；老实现「首行不是 ISSUES 就放行」
+# 于是把「没完成评审」读成「评审通过」——质量门在评审服务挂掉时静默失效，
+# 对外还表现成「已通过评审」。
+
+REVIEW_DOWN = "（LLM 暂时不可用，已降级）请稍后再试，或检查 .env 中的 LLM_API_KEY / LLM_BASE_URL 配置。"
+
+
+class TestReviewUnavailableIsNotPass:
+    def test_verdict_is_tristate(self):
+        from src.graph import _review_verdict
+        assert _review_verdict("ISSUES: 数据不一致") == "issues"
+        assert _review_verdict("PASS 无问题") == "pass"
+        assert _review_verdict(REVIEW_DOWN) == "unavailable"
+        assert _review_verdict("（模型本次未生成内容）") == "unavailable"
+        assert _review_verdict("") == "unavailable"
+
+    def test_markdown_emphasis_still_counts_as_issues(self):
+        """模型偶尔输出「**ISSUES**」「- ISSUES」，别因为行首符号漏判成通过。"""
+        assert _review_failed("**ISSUES**: 缺数据引用") is True
+        assert _review_failed("> ISSUES: 数字可疑") is True
+        assert _review_failed("## PASS") is False
+
+    def test_markdown_issues_triggers_rewrite(self, monkeypatch):
+        reviewer = _FakeAgent("**ISSUES**: 缺数据引用")
+        planner = _FakeAgent("重写后的周报")
+        monkeypatch.setattr(graph_mod, "get_agent",
+                            lambda n: reviewer if n == "reviewer" else planner)
+        out, _u, _e, _b = _run(_steps("analyst", "planner"))
+        assert planner.calls == 1 and "重写后的周报" in out
+
+    def test_degraded_review_annotates_output(self, monkeypatch):
+        """评审降级 → 最终输出必须如实标注「未完成质量评审」。"""
+        _patch_llm_synth(monkeypatch, {})
+        monkeypatch.setattr(graph_mod, "get_agent",
+                            lambda n: _FakeAgent(REVIEW_DOWN))
+        out, _u, events, _b = _run(_steps("analyst", "planner"))
+        assert "未完成质量评审" in out
+        rev = [e for e in events if e.get("agent") == "reviewer"][-1]
+        assert rev["review_unavailable"] is True
+
+    def test_reviewer_crash_annotates_output(self, monkeypatch):
+        """评审节点抛异常同样是「没完成评审」，不是通过。"""
+        class _Boom:
+            def handle(self, inp, ctx=None):
+                raise TimeoutError("评审超时")
+        monkeypatch.setattr(graph_mod, "get_agent", lambda n: _Boom())
+        out, _u, events, _b = _run(_steps("analyst", "planner"))
+        assert "未完成质量评审" in out
+        assert any(e["type"] == "agent_error" and e.get("agent") == "reviewer"
+                   for e in events)
+
+    def test_normal_pass_has_no_unavailable_note(self, monkeypatch):
+        out, _u, events, _b = _run(_steps("analyst", "planner"))
+        assert "未完成质量评审" not in out
+        rev = [e for e in events if e.get("agent") == "reviewer"][-1]
+        assert not rev.get("review_unavailable")
+
+
 # ---------------------------------------------------------------- 3. 依赖校验
 
 

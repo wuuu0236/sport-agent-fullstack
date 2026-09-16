@@ -87,6 +87,27 @@ def health():
     return {"status": "ok", "mock": config.CONFIG.mock_mode, "model": config.CONFIG.LLM_MODEL}
 
 
+# 编排中间产出写进 session 时每个子 Agent 的截断长度：只是给追问留上下文，
+# 不是存档，没必要把 1500 token 的原始产出整段塞回去。
+_MID_TRUNC = 400
+
+
+def _summarize_events(events: list) -> str:
+    """把编排事件里各子 Agent 的产出拼成**一条** session 摘要；无产出返回 ""。
+
+    为什么要它：/chat 的编排分支此前只把最终成品写进 session，子 Agent 中间产出
+    （searcher 查到什么、analyst 算了什么）全部丢弃——用户追问「为什么你这么建议」时，
+    历史里没有依据，上下文是断的。
+    为什么拼成一条而不是每个 agent 一条：session 是 SESSION_LIMIT=50 的滚动窗口，
+    一次编排写 4 条会把真实历史挤掉，得不偿失。
+    """
+    parts = []
+    for e in events or []:
+        if e.get("type") == "agent_done" and e.get("output"):
+            parts.append(f"[{e.get('agent')}] {str(e['output']).strip()[:_MID_TRUNC]}")
+    return ("[编排过程]" + "｜".join(parts)) if parts else ""
+
+
 @app.post("/chat")
 def chat(req: ChatReq):
     # 短期会话记忆落盘：用户消息先 append，助理回复后再 append。
@@ -185,6 +206,10 @@ def chat(req: ChatReq):
             events.append(e)
         sv = SupervisorAgent()
         final = sv.run(req.message, emit=_emit)
+        # 中间产出先入 session（一条摘要），再写最终成品——顺序反映真实发生次序。
+        mid = _summarize_events(events)
+        if mid:
+            memory.append_session("assistant", mid)
         memory.append_session("assistant", final)
         # 编排路径此前 metadata 恒为 {}，看不到子 Agent 到底吃到了哪些技能；
         # 技能注入修好后一并把命中情况回传，便于自查（与单 Agent 路径口径一致）。
@@ -204,6 +229,11 @@ def chat(req: ChatReq):
         ctx.update(req.context)
     try:
         out = agent.handle(req.message, ctx)
+    except IOError as e:
+        # 训练记录落盘失败（磁盘满/权限）：SportStore._save 现在会抛出而不是静默，
+        # 这里如实告诉用户「没存进去」，别退化成一句看不出所以然的 500。
+        raise HTTPException(status_code=503,
+                            detail=f"训练记录没能写入本地磁盘：{e}") from e
     except Exception as e:
         raise _agent_error(name, e)
     memory.append_session("assistant", out)
@@ -357,18 +387,31 @@ def discard_plan():
 def import_image(req: ImportReq):
     """训练截图导入：本地 OCR → 文字 → LLM 解析 → 暂存（不落库）。
 
-    P0-3 修复：解析结果先进暂存区（workspace:isolated），返回 staged 标记，
-    由前端确认后调 /commit 落库——防止 OCR/LLM 误解析直接污染真实训练库。
-    截图不外传，仅 OCR 文本送 LLM。
+    P0-3 修复：解析结果先进暂存区（workspace:isolated），由前端确认后调 /commit
+    落库——防止 OCR/LLM 误解析直接污染真实训练库。截图不外传，仅 OCR 文本送 LLM。
+
+    返回字段（前端按这三条分支走，少一条就会出现「后端已暂存、前端却报导入失败」）：
+    - `data`：解析出的结构化记录（可能 type=unknown）；
+    - `saved`：恒为 False（本端点不再直接落库）；
+    - `staged`：布尔标记，是否已进待确认队列；
+    - `staged_records`：进队的记录本体（**带 `_staged_id`**）。前端确认时把这条回传
+      `/commit`，后端才能按 id 只清这一条——只给布尔量的话前端只能整队清空，
+      并发会话会互相踩（P0 修过的正是这个）。
     """
     res = image_import(req.image, req.mime)
     if res.get("ok") and res.get("data"):
         try:
-            staged = _stage_import_data(res["data"])
-            res["saved"] = False
-            res["staged"] = staged
+            rec = _stage_import_data(res["data"])
         except Exception as e:  # noqa: BLE001
+            rec = None
             res["save_error"] = str(e)
+        res["saved"] = False
+        res["staged"] = bool(rec)
+        res["staged_records"] = [rec] if rec else []
+        if not rec and "save_error" not in res:
+            # 解析出来了却进不了队（类型不认识 / 力量动作列表为空）：如实说，
+            # 否则前端只能显示「导入失败」这种看不出所以然的兜底文案。
+            res["save_error"] = "已解析出内容，但不属于可入库的训练记录类型"
     return res
 
 
@@ -397,10 +440,17 @@ def commit(req: dict = None):
 
     带 records 时按每条记录的 _staged_id 精确清除对应暂存——只清「本次确认」的，
     不误清其他会话/并发请求的暂存（旧实现 discard_staged() 全清，多用户会互相踩）。
+
+    失败语义：落库没成功就**不清暂存**，返回 ok=False + kept=True，前端据此保留
+    待确认卡片让用户重试（老实现先把暂存清掉再落库，失败即无声丢数据）。
     """
     store = SportStore()
     if req and req.get("records"):
         r = _import_save({"records": req["records"]})
+        # _import_save 落库失败只返回 {"ok": False} 而不抛异常，必须显式检查。
+        if not r.get("ok"):
+            return {"ok": False, "kept": True,
+                    "msg": "落库失败，暂存记录已保留（可重试）", "detail": r}
         ids = [rec.get("_staged_id") for rec in req["records"]
                if rec.get("_staged_id")]
         if ids:
@@ -409,14 +459,26 @@ def commit(req: dict = None):
             # 兼容旧调用：记录里没有 _staged_id（如直接 API 传的原始数据）时按旧语义清空
             store.discard_staged()
         return r
-    n = store.commit_staged()
+    try:
+        n = store.commit_staged()
+    except Exception as e:  # noqa: BLE001
+        # _save 失败已改为抛 IOError（不再静默吞掉）；出队发生在落库成功之后，
+        # 所以这里记录仍在暂存里，下次确认还能落库。
+        return {"ok": False, "kept": True,
+                "msg": f"落库失败，暂存记录已保留（可重试）：{e}"}
     if n:
         return {"ok": True, "msg": f"✅ 已确认入库 {n} 条训练记录"}
     return {"ok": False, "msg": "暂存区为空，无需提交"}
 
 
-def _stage_import_data(data: dict) -> bool:
-    """把图片导入解析出的单条记录放进暂存队列（不落库）。"""
+def _stage_import_data(data: dict) -> dict:
+    """把图片导入解析出的单条记录放进暂存队列（不落库）。
+
+    **返回带 `_staged_id` 的记录本体，暂存不了时返回 None**（以前返回 bool）。
+    返回记录而不是布尔量是前端确认环节的前提：前端要拿 `_staged_id` 调 `/commit`，
+    后端才能按 id 精确清除「本次确认的那条」。返回 bool 的话前端只知道「进队了」，
+    确认时只能整队清空，多会话并发会互相踩（P0 修过的踩踏问题）。
+    """
     store = SportStore()
     t = data.get("type")
     date = data.get("date") or datetime.date.today().isoformat()
@@ -426,20 +488,20 @@ def _stage_import_data(data: dict) -> bool:
             dur = float(data.get("duration_min") or 0)
             if dist > 0 and dur <= 0:
                 dur = round(dist * 6, 1)
-            store.stage_run(date, dist, dur, int(data.get("avg_hr") or 0),
-                            int(data.get("max_hr") or 0),
-                            hr_series=data.get("hr_series") or None,
-                            rpe=int(data.get("rpe") or 0),
-                            note=data.get("note") or "图片导入")
-            return True
+            return store.stage_run(
+                date, dist, dur, int(data.get("avg_hr") or 0),
+                int(data.get("max_hr") or 0),
+                hr_series=data.get("hr_series") or None,
+                rpe=int(data.get("rpe") or 0),
+                note=data.get("note") or "图片导入")
         elif t == "strength":
             exs = data.get("exercises") or []
             if exs:
-                store.stage_strength(date, exs, note=data.get("note") or "图片导入")
-                return True
+                return store.stage_strength(
+                    date, exs, note=data.get("note") or "图片导入")
     except Exception:  # noqa: BLE001
-        return False
-    return False
+        return None
+    return None
 
 
 def _supervise_stream(task: str):
@@ -529,7 +591,10 @@ def _detect_goal(msg: str):
                  "制定", "规划", "生成", "做一份", "来一份", "像在", "比如",
                  "例如", "类似"):
         idx = goal.find(stop)
-        if 0 < idx:
+        # 必须是 idx >= 0：停用词出现在句首时（「我的目标是计划减脂」→ goal="计划减脂"）
+        # idx==0，老写法 0 < idx 判假、不截断，于是「计划减脂」这种鬼话被当成训练目标
+        # 写进 USER.md 并触发计划生成。截断成空串后由下面的 len(goal) < 2 兜住 → 返回 None。
+        if idx >= 0:
             goal = goal[:idx]
     # 去掉连接词（并且/同时/还有/以及）与逗号/空格，合并成干净复合目标，
     # 如「减脂，并且三分化」→「减脂三分化」，避免出现逗号粘连的计划名。
@@ -539,8 +604,14 @@ def _detect_goal(msg: str):
     goal = goal.strip(" 。.，,！!？?、\n")
     if len(goal) < 2:
         return None
-    # 如果提取出来的是问句/咨询意图，不算目标变更
-    if goal.startswith(("怎么", "如何", "为什么", "什么", "怎样", "咋", "该不该", "要不要")):
+    # 问句 / 咨询意图不算目标变更。**必须扫整句，不能只看句首**：
+    # 「我要去跑半马，有什么建议」是「我想…」开头 + 问句结尾的混合句，
+    # 老实现 startswith 只判句首，于是整句被当成新目标写进画像、还生成了计划
+    # （USER.md 的训练目标被写成一句问话，之后每轮对话都带着这个错目标）。
+    # 判据：疑问/征求建议的词出现在**任何位置**都按问句处理——宁可不改目标。
+    if any(k in goal for k in ("怎么", "如何", "为什么", "什么", "怎样", "咋",
+                               "该不该", "要不要", "能不能", "可不可以",
+                               "建议", "多少", "吗", "呢", "?", "？")):
         return None
     # 把分散在句子里的训练类型/分化词合并进目标，避免只提取到「减脂」而丢掉「三分化」。
     # 例如「我要减脂，给我安排训练计划，要求三分化」→「减脂三分化」。

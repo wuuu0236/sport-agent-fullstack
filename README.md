@@ -18,10 +18,16 @@
    协作全程通过 **SSE 实时推送**到前端看板：拆解了哪几步、谁在跑、谁失败、谁产出，全部**肉眼可见**。
 2. **子 Agent 独立工作空间**——写库子 Agent（recorder）解析结果先进**暂存区**，主循环结束发 `pending_commit`  
    事件，前端确认后才 `/commit` 落库。图片导入同样先暂存（顺带修复「导入即入库」的 P0-3 回归）。  
-   暂存区落 **SQLite（WAL）**：**服务重启后待确认记录仍在**（此前是进程内 list，重启即清零），并发保护也不再依赖手写锁。
+   暂存区落 **SQLite（WAL）**：**服务重启后待确认记录仍在**（此前是进程内 list，重启即清零），并发保护也不再依赖手写锁。  
+   落库失败时**不清暂存**（返回 `ok:false + kept:true`，前端保留待确认卡片可重试）：写盘失败会抛 `IOError`，  
+   且出队发生在落库**成功之后**——不会出现「没进磁盘、也不再待确认」的无声数据丢失。  
+   确认侧再做**原子抢占**（`staged → committing`，只有 UPDATE 影响行数为 1 的调用者才有资格落库）：  
+   两个请求同时点确认时，同一条记录只会写进训练库一次；抢占用 120s 租期兜底，抢占方崩溃不会让记录永久卡死。
 3. **失败门控 + 评审三层**——子 Agent 空返回/空串兜底文案（哨兵）→ 判该节点失败（`agent_error`）、跳过继续，  
    绝不把模型废话当产出喂给下一步；综合阶段空/异常自动降级为「如实汇总各节点真实产出」。  
-   收口前还有一道`reviewer`复核：**规则检查先行**（机械缺陷直接判不过，不花 token）+ **结构化清单逐项判定** + **可换模型评审**，未消化的意见附进最终产出。
+   收口前还有一道`reviewer`复核：**规则检查先行**（机械缺陷直接判不过，不花 token）+ **结构化清单逐项判定** + **可换模型评审**，未消化的意见附进最终产出。  
+   **评审不可用 ≠ 评审通过**：评审模型降级或评审节点异常会置 `review_unavailable`，成品末尾如实标注「本轮未完成质量评审」——  
+   旧实现把这种情况静默读成通过，评审服务一挂质量门就等于不存在。
 4. **依赖链 `@s1` 引用**——LLM 拆解时若判断某步需要前序结果，在 input 里写 `@s2`，执行时代码替换成  
    前序节点真实产出（截断 400 字），子 Agent 成果在代码层串起来，不靠模型"记得"。
 5. **本地隐私优先**——训练截图走**本地 OCR**，图片永不离开本机，解析后先暂存、确认后结构化落库。
@@ -41,11 +47,11 @@
            → validate(依赖校验：@sN 漏引自动补、无效引用清除)
            → dispatch ⇄ dispatch（逐节点：替换@s1→调子Agent→空/哨兵判失败→agent_done|agent_error）
            → review(三层：规则检查→换模型评审→结构化清单) ──ISSUES 且被评节点是 planner──→ rewrite(仅重写一次) → synthesize
-           → synthesize(单步直接用；最后成功步是 planner 用其产出；否则主 Agent 亲自 LLM 综合)
+           → synthesize(单步/最后成功步是 planner 且产出**可交付**（非空、非哨兵、非降级文案）才直接用；否则主 Agent 亲自 LLM 综合)
            → complete(output, final) → 若有暂存 → pending_commit(count, records)
   ↓ 子 Agent 独立执行 —— 上下文隔离（技能按主理 Agent 门控注入 `match_skills_for`：未声明 owner 全开放 / 同名才注入 / coach 例外吸收 clinician、expert；无对话历史 / 记忆按需召回 Top5；
      planner 例外：强制全量注入用户画像，防伤病限制被语义召回漏掉），只交产出字符串
-  ↓ 数据层 —— recorder 解析 → 暂存队列（SQLite，WAL）→ 前端「确认入库」→ /commit → 落库
+  ↓ 数据层 —— recorder 解析 → 暂存队列（SQLite，WAL）→ 前端「确认入库」→ /commit（原子抢占）→ 落库
 ```
 
 **子 Agent 名录**（`agent-service/src/agents/`），按实现方式分两类：
@@ -60,6 +66,8 @@
   ② 评审按**五维结构化清单**逐项给出 `[OK]`/`[NG]`，而不是开放式"看看行不行"；
   ③ 配 `REVIEW_MODEL` 可让评审走**另一套模型**（消除同模型自评的盲区共享与自我偏好），
   未配置则回退同模型并在事件里如实标注 `reviewer_model`。非 planner 步骤的评审意见不再丢弃，会传给综合节点供修正或标注；  
+  评审不可用（降级/异常）**单独置位 `review_unavailable`**，不混同「通过」——重写失败时评审意见也必须继续传到综合层，  
+  否则用户拿到的是「已知有问题」的成品却毫无提示。
   **`coach`(谭成义人格教练) 是独立入口而非别名**——健身域问题统一由它单 Agent 直答。
   **人格显式分两层**：① *基础人格层* `CoachAgent.PERSONA_CORE`（身份 / 核心原则 / 动作铁律 / 表达风格 / 边界声明），**只接受人工改代码**——`存技能` / `patch 技能` 只落盘 `skills/`，没有任何代码路径能回写它，所以模型自进化改不跑偏人格；② *补充知识层* = `skills/` 下归属 coach 的 SKILL.md，运行时按触发词注入（对话路径经基类 Tier 3，结构化路径的「补一句建议」经 `_tip`）。**边界要说清**：跑步/力量解析、心率区间数值、TRIMP 全是 `sport_data.py` 的确定性计算、不消费技能——知识层改的是**判读口径**，不是 `ZONES` 里的数值边界。
 - 保留旧别名：`research`→searcher、`posture`→clinician、`memorist`→memory。
@@ -92,7 +100,7 @@ sport-agent-fullstack/
 │   ├── requirements.txt / requirements-dev.txt / requirements-ocr.txt
 │   ├── .env            # 含 LLM_API_KEY（已被根目录 .gitignore 排除，切勿提交）
 │   ├── data/           # 记忆与训练记录（自动生成）；暂存队列在 staged.db（SQLite，抗重启）
-│   ├── tests/          # pytest 197 条：解析 / 意图(LLM分类+规则兜底) / 编排图 / 评审规则 / 分析 / 计划(质量门+产出类型) / 技能 / 人格分层 / 存储 / 检索 / 暂存 / HTTP 鉴权
+│   ├── tests/          # pytest 256 条：解析 / 意图(LLM分类+规则兜底) / 编排图 / 评审规则 / 分析 / 计划(质量门+产出类型) / 技能 / 人格分层 / 存储 / 检索 / 暂存 / 落库防线 / 截图导入 / LLM 调用层 / 编排上下文 / HTTP 鉴权
 │   ├── skills/         # 4 个可插拔教练技能（SKILL.md，按触发词动态挂载）——即 coach 的「补充知识层」
 │   ├── .venv/          # 项目专属虚拟环境（LangGraph 依赖，不入库）
 │   ├── _dump_prompt.py # 诊断工具：打印任意输入真正发给 LLM 的完整提示词（4 层拼装结果，排障/自查用）
@@ -211,7 +219,7 @@ start-all.bat
 - **CORS**：旧版 `src/server.py`（休眠的 stdlib HTTP 入口）从 `*` 收紧为仅回显本机 Origin，并走同一 token 校验。
 - **异常脱敏**：Agent 内部异常只记服务端日志，客户端拿通用文案；旧版 `.env` 上传限制等回归见 `CHANGELOG.md`。
 
-## 测试（197 个用例，`pytest tests/` 全绿）
+## 测试（256 个用例，`pytest tests/` 全绿）
 
 ```bash
 cd agent-service
@@ -219,20 +227,24 @@ cd agent-service
 .venv/Scripts/python -m pytest tests/ -q
 ```
 
-`tests/` 下 14 个文件，覆盖十二层：
+`tests/` 下 18 个文件，覆盖十六层：
 
 | 层 | 文件 | 覆盖内容 |
 | --- | --- | --- |
 | 解析 | `test_parsers.py` | 文件导入（GPX / CSV / OCR 规则兜底） |
 | 意图 | `test_intent.py` | 目标检测、规则兜底判定、**LLM 分类（JSON 解析 / 垃圾输出回退 / 显式编排）**、coach 意图分流（「要点/技巧/怎么做」不被误判成查数据） |
-| 编排图 | `test_graph.py` | **事件序列契约（前端/网关依赖）**、逐步派发与失败继续、`@sN` 依赖校验（补引 / 清无效引用）、评审三层接线（规则短路 / 意见传到综合）、评审重写只做一次、兜底模板分档 |
+| 编排图 | `test_graph.py` | **事件序列契约（前端/网关依赖）**、逐步派发与失败继续、`@sN` 依赖校验（补引 / 清无效引用）、评审三层接线（规则短路 / 意见传到综合）、评审重写只做一次、兜底模板分档、**评审不可用 ≠ 评审通过**（降级/异常置位 `review_unavailable` 并在成品上如实标注）、**重写失败不丢评审意见**、坏产出（空/哨兵/降级）不直出 |
 | 评审 | `test_review_rules.py` | 规则层判据边界（只有空 / 哨兵 / 降级 / 过短判 blocking，缺段落与数字无出处**只提示不裁决**）、`format_issues` 与评审闸门协议一致 |
 | 分析 | `test_analyze.py` | 心率区间 / 负荷 / 力量趋势 |
-| 计划 | `test_plan_store.py` · `test_plan_guard.py` · `test_planner_prompt.py` | 流转与并发、写入点质量门（拦降级文本）、planner 产出类型（周报 vs 计划） |
+| 计划 | `test_plan_store.py` · `test_plan_guard.py` · `test_planner_prompt.py` | 流转与并发、写入点质量门（拦降级文本）、planner 产出类型（周报 vs 计划）、**`plans.json` 原子写**（临时文件 + `os.replace`，不留半个 JSON、不留 tmp） |
 | 技能 | `test_skills.py` | 三级渐进加载 / 触发词去重 / 主理 Agent 门控 |
 | 人格分层 | `test_coach_persona.py` | **人格层不被自进化写入**（patch 技能后 `PERSONA_CORE` 字节不变）、知识层在对话路径与结构化路径（补建议）都被注入、`存技能` 后目录缓存热更新 |
-| 存储 | `test_memory.py` | 双存储读改写 + **WAL 并发（多线程 append 零丢失）** + 旧 Markdown/session.json 一次性迁移（幂等）+ 整套替换重建索引 |
-| 暂存 | `test_staged_store.py` | **跨进程/跨重启耐用**（新连接仍读到暂存记录）、FIFO 顺序、按 `_staged_id` 精确清除、8 线程并发暂存零丢失 |
+| 存储 | `test_memory.py` | 双存储读改写 + **WAL 并发（多线程 append 零丢失）** + 旧 Markdown/session.json 一次性迁移（幂等）+ 整套替换重建索引 + **`reset_long_term` 的「重置演示数据」语义**（长期记忆与会话历史一并清，与注释一致） |
+| 暂存 | `test_staged_store.py` | **跨进程/跨重启耐用**（新连接仍读到暂存记录）、FIFO 顺序、按 `_staged_id` 精确清除、8 线程并发暂存零丢失、**并发确认不重复入库**（原子抢占 `staged → committing`，起跑线对齐的多线程确认每条只落一次）、抢占租期回收（抢占方崩溃不卡死）、旧库自动补列 |
+| 截图导入 | `test_import_stage.py` | **截图导入闭环**：`staged_records` 必须带 `_staged_id`（前端要靠它精确确认，只给布尔量前端只能整队清空）、`_stage_import_data` 返回记录本体而非 bool、解析成功但无法入库时给出可读原因 |
+| 落库防线 | `test_commit_guard.py` | **落库失败不许丢数据**：`/commit` 检查 `_import_save` 的返回值（它失败只标记、不抛异常），`_save` 失败抛 `IOError`，`commit_staged` 改成**先落库成功才出队**、失败记录留在暂存可重试 |
+| LLM 调用层 | `test_llm_timeout.py` | **timeout 透传**（拆解 15s / 综合 30s，打桩捕获实参 kwargs）、失败时异常类型与原因进服务端日志、面向用户的降级文案不变 |
+| 编排上下文 | `test_session_context.py` | **编排中间产出写进 session**（拼成一条 `[编排过程]` 摘要，不挤占 50 条滚动窗口）、摘要能被 `session_turns` 读回注入 |
 | 检索 | `test_memory_search.py` | **中文自然语言召回**（钉住旧实现「整句一个 token → 0 命中」的回归）、词/bigram 双索引、bm25 分列权重、向量侧降级与近重复合并 |
 | HTTP | `test_http_auth.py` | 鉴权中间件 + 异常脱敏 |
 

@@ -75,6 +75,9 @@ class OrchestrationState(TypedDict, total=False):
     # 必须在这里声明：LangGraph 按 TypedDict 的字段建通道，没声明的键会被静默丢弃
     # （实测踩过——节点 return 了 review_issues，synthesize 却永远读到空）。
     review_issues: str
+    # 评审**没有完成**（评审模型不可用 / 评审节点异常）——与「评审通过」是两回事。
+    # 同样必须声明，否则置位被静默丢弃，最终输出上的「未完成评审」提示就永远不出现。
+    review_unavailable: bool
     used_skills: dict
     output: str
     filled_refs: list
@@ -271,13 +274,22 @@ def _build_graph(emit, backend=None):
                     f"用户需求：{task}\n\n待评审内容：\n{out}{hint_block}",
                     {"skills": [], "use_history": False, "recall_mode": "recall",
                      **override})
+                unavailable = review_rules.is_degraded(review)
                 emit({"type": "agent_done", "agent": "reviewer", "step": n, "total": n,
                       "output": (review or "")[:200],
-                      "reviewer_model": reviewer_model})
+                      "reviewer_model": reviewer_model,
+                      "review_unavailable": unavailable})
+                if unavailable:
+                    # 评审模型降级（返回「（LLM 暂时不可用，已降级）…」）= 评审没跑成。
+                    # 老实现直接落到下面「不是 ISSUES 就放行」，于是评审服务挂掉时
+                    # 质量门静默失效、还对外表现成「已通过评审」。这里单独置位，
+                    # 由 synthesize 在最终输出上如实标注。
+                    return {"review": "", "review_issues": "", "review_unavailable": True}
             except Exception as e:  # noqa: BLE001
                 emit({"type": "agent_error", "agent": "reviewer", "step": n, "total": n,
                       "error": str(e)})
-                return {"review": "", "review_issues": ""}
+                # 评审节点异常同样是「没完成评审」，不是「通过」。
+                return {"review": "", "review_issues": "", "review_unavailable": True}
         # 只有「评审不过 + 被评节点是 planner」才值得重写（planner 产出本是综合结果）。
         # 非 planner 的 ISSUES 不丢弃——交给综合节点当「已知不可靠项」（第三层传递）。
         if not _review_failed(review):
@@ -301,17 +313,21 @@ def _build_graph(emit, backend=None):
                 # （那段文本里没有「周报」字样），周报会被重写成训练计划。
                 {"skills": [], "use_history": False, "recall_mode": "recall",
                  "task": state["task"]})
-            if (rewrite or "").strip() and _SENTINEL not in (rewrite or ""):
+            if _deliverable(rewrite):
                 results[step["id"]] = {"agent": "planner", "output": rewrite}
                 emit({"type": "agent_done", "agent": "planner", "step": n, "total": n,
                       "output": rewrite[:200]})
-            else:
-                emit({"type": "agent_error", "agent": "planner", "step": n, "total": n,
-                      "error": "重写失败（模型未生成），保留原产出"})
+                return {"results": results}
+            emit({"type": "agent_error", "agent": "planner", "step": n, "total": n,
+                  "error": "重写失败（模型未生成），保留原产出"})
         except Exception as e:  # noqa: BLE001
             emit({"type": "agent_error", "agent": "planner", "step": n, "total": n,
                   "error": str(e)})
-        return {"results": results}
+        # 重写没成：planner 那份**刚被评审判过没过**的产出被原样保留，而综合层会直出它。
+        # 此时评审意见绝不能丢——否则用户拿到的是「已知有问题」的成品，却没有任何提示。
+        # 意见必须走 `review_issues` 通道：`state["review"]` 只服务于重写节点，
+        # 综合层不读它（老实现只保留产出、意见原地蒸发，坏产出不带警告地漏出）。
+        return {"results": results, "review_issues": state.get("review") or ""}
 
     def synthesize_node(state: OrchestrationState) -> dict:
         steps, results = state["steps"], state.get("results") or {}
@@ -319,6 +335,12 @@ def _build_graph(emit, backend=None):
         # 哪一步的产出不可靠（原先这类 ISSUES 被记录后即丢弃）。
         final = store.synthesize(state["task"], steps, results,
                                  issues=state.get("review_issues") or "")
+        if state.get("review_unavailable"):
+            # 评审没跑成时必须让用户知道：否则「评审服务挂了」会被静默读成
+            # 「评审通过」，质量门的对外可信度直接归零。
+            note = ("\n\n---\n⚠️ 评审服务暂不可用，本轮**未完成质量评审**"
+                    "（这不等于通过），请谨慎参考。")
+            final = final + note if final else note.lstrip("\n")
         # complete 事件携带最终输出 + final 标记（前端据此收尾渲染）
         emit({"type": "complete", "status": "ok" if final else "degraded",
               "output": final, "final": True})
@@ -372,7 +394,9 @@ class _GraphBackend:
             raw = llm.chat(
                 [{"role": "system", "content": prompt},
                  {"role": "user", "content": task}],
-                temperature=0.2, max_tokens=900,
+                # timeout=15：拆解只是输出一段 JSON，默认 60s 太长——真卡满会把 SSE
+                # 连接拖到中间层（Nginx/浏览器）先超时断开，前端连 error 事件都收不到。
+                temperature=0.2, max_tokens=900, timeout=15,
             )
         except Exception:
             raw = ""
@@ -407,22 +431,30 @@ class _GraphBackend:
     def synthesize(self, task: str, plan: list, results: dict, issues: str = "") -> str:
         if len(plan) == 1:
             r = results.get(plan[0]["id"])
-            if not (r and r.get("output")):
+            # `_deliverable` 兜住空/哨兵/降级文案：单步产出若是这三类，直出等于把
+            # 「没生成出来」原样交给用户，改报「未产出有效结果」更诚实。
+            if not _deliverable((r or {}).get("output")):
                 return "（子 Agent 未产出有效结果，请稍后重试。）"
             return _annotate(r["output"], issues)
 
-        # 多步：最后一个成功步骤若是 planner，其产出已综合 → 直接采用
+        # 多步：最后一个成功步骤若是 planner，其产出已综合 → 直接采用。
+        # 但**不能无条件直出**：重写失败时保留的正是那份被评审判过没过的产出，
+        # 若它本身还有机械缺陷（空/哨兵/降级），直出就是坏产出漏出。
+        # 这种情况落到下面的汇总分支，让主 Agent 基于其它步骤的有效产出重新收口
+        # （此时 issues 通道已带着评审意见进来，见 rewrite_node 的收尾）。
         for step in reversed(plan):
             r = results.get(step["id"])
             if r and r.get("output"):
-                if step["agent"] == "planner":
+                if step["agent"] == "planner" and _deliverable(r["output"]):
                     return _annotate(r["output"], issues)
                 break
 
         blocks, joined = [], []
         for step in plan:
             r = results.get(step["id"])
-            if r and r.get("output"):
+            # 汇总分支同样只喂可交付的产出：把降级文案混进综合提示词，
+            # 主 Agent 会照抄进成品里。
+            if r and _deliverable(r.get("output")):
                 blocks.append(f"【{r['agent']}】\n{r['output']}")
                 joined.append(f"【{r['agent']}】\n{r['output'][:600]}")
         if not blocks:
@@ -450,7 +482,9 @@ class _GraphBackend:
             reply = llm.chat(
                 [{"role": "system", "content": sys},
                  {"role": "user", "content": f"用户需求：{task}\n\n子 Agent 产出：\n{joined_short}{issue_block}"}],
-                temperature=0.4, max_tokens=1500,
+                # timeout=30：综合要读全部子 Agent 产出、输出最长的一段，比拆解给得多，
+                # 但仍短于默认 60s，避免 SSE 被中间层先掐断。超时会走下面的空产出降级。
+                temperature=0.4, max_tokens=1500, timeout=30,
             )
         except Exception:
             reply = ""
@@ -473,13 +507,43 @@ def _last_success(plan: list, results: dict):
     return None, None
 
 
-def _review_failed(review: str) -> bool:
-    """评审是否「不过」：仅首行 ISSUES 视为不过；评审异常/空/其他都视为通过
-    （评审失败不该惩罚已产出的内容，也不该引发重写风暴）。"""
+# 评审首行协议：模型偶尔会把结论写成「**ISSUES**」「- ISSUES」「> ISSUES」，
+# 精确 startswith 会漏判成通过，所以先剥掉行首的 markdown 强调/引用/列表符号。
+_VERDICT_PREFIX_RE = re.compile(r"^[\s>*#`\-_]+")
+
+
+def _review_verdict(review: str) -> str:
+    """评审结论三态：``"issues"`` / ``"pass"`` / ``"unavailable"``。
+
+    ``unavailable`` = **没有完成评审**（评审模型降级、返回哨兵或空、评审节点抛异常）。
+    它绝不能与 ``pass`` 合并：合并之后「评审服务挂了」会静默变成「一律通过」，
+    质量门看起来还在、实际已经失效。
+    """
     s = (review or "").strip()
-    if not s or _SENTINEL in s:
-        return False
-    return s.startswith("ISSUES")
+    if review_rules.is_degraded(s):
+        return "unavailable"
+    head = _VERDICT_PREFIX_RE.sub("", s.splitlines()[0])
+    return "issues" if head.upper().startswith("ISSUES") else "pass"
+
+
+def _review_failed(review: str) -> bool:
+    """评审是否「不过」：**只有明确写 ISSUES 才算不过**。
+
+    评审失败（空/异常/降级）故意不算不过——它不该惩罚已产出的内容，也不该引发
+    重写风暴；但它也不再被当成「通过」，调用方用 `_review_verdict` 把这种状态
+    单独识别出来，在最终输出里如实标注「本轮未完成质量评审」。
+    """
+    return _review_verdict(review) == "issues"
+
+
+def _deliverable(text: str) -> bool:
+    """产出是否「可以直接交付」。
+
+    只拦**机械可判**的缺陷（空 / 哨兵 / 降级文案）——这三类没有任何解释空间。
+    **刻意不含长度阈值**：planner 的短产出也可能是完整结论，用长度判会把好产出
+    误杀（评审规则层历史上就吃过误报的亏，见 review_rules 的说明）。
+    """
+    return not review_rules.is_degraded(text)
 
 
 def _annotate(output: str, issues: str) -> str:

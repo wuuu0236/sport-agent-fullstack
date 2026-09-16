@@ -42,6 +42,39 @@ class TestDetectGoal:
     def test_question_is_not_goal(self):
         assert _detect_goal("怎么才能减脂") is None
 
+    def test_question_tail_is_not_goal(self):
+        """回归（2026-09-17）：问句护栏不能只判句首。
+
+        「我要去跑半马，有什么建议」是「我想…」开头 + 问句结尾的混合句，
+        老实现 `goal.startswith(("怎么", "如何", "什么"…))` 只看句首 → 判不是问句
+        → 整句被当成新训练目标写进画像、还生成了计划。之后每轮对话都带着这个
+        错目标（USER.md 里那行「我要去跑半马有什么建议半马」就是这么来的）。
+        """
+        assert _detect_goal("我要去跑半马，有什么建议") is None
+        assert _detect_goal("我想增肌怎么练") is None
+        assert _detect_goal("我要减脂，有什么建议吗") is None
+
+    def test_goal_statement_without_question_still_works(self):
+        # 反向锁定：不带疑问尾巴的目标陈述仍要能识别（别把护栏放太宽）
+        assert _detect_goal("我要体测") == "体测"
+        assert _detect_goal("我想增肌") == "增肌"
+
+    def test_stop_word_at_index_zero_truncates(self):
+        """回归（代码审查问题 3）：停用词出现在目标文本**开头**时（idx == 0）。
+
+        老写法 `if 0 < idx` 判假、不截断，于是「我的目标是计划减脂」整句留下
+        「计划减脂」这种鬼话，写进 USER.md 还顺带触发计划生成。
+        截断成空串后由 `len(goal) < 2` 兜住 → None（宁可不改目标，也别写错目标）。
+        """
+        assert _detect_goal("我的目标是计划减脂") is None
+        # 同类：截断点落在后一个停用词上（「生成」跑到句首）也要能兜住
+        assert _detect_goal("我想生成增肌计划") is None
+
+    def test_stop_word_in_the_middle_still_works(self):
+        # 反向锁定：停用词在中间的正常截断行为不能被改坏
+        assert _detect_goal("我的目标改成增肌") == "增肌"
+        assert _detect_goal("我要减脂，给我安排训练计划，要求三分化") == "减脂三分化"
+
 
 class TestNeedsOrchestration:
     def test_recording_stays_single_agent(self):
@@ -75,6 +108,22 @@ class TestNeedsOrchestration:
     def test_talking_about_report_stays_single(self):
         # 「谈论周报」≠「要生成周报」：问答类不编排
         assert _needs_orchestration("周报一般包含什么内容") is False
+
+    def test_report_with_style_modifier_still_orchestrates(self):
+        """回归（代码审查问题 4）：修饰词不能压过产出动作词。
+
+        「帮我生成本周训练周报，格式好看一点」里带「格式」，老实现按概念询问
+        判 False → 用户明确要周报，却拿到 coach 一人硬答，不是真正的多 Agent 周报。
+        """
+        assert _needs_orchestration("帮我生成本周训练周报，格式好看一点") is True
+        assert _needs_orchestration("帮我写个周报，格式要清楚") is True
+        assert _needs_orchestration("给我一份月度报告，模板随意") is True
+
+    def test_report_concept_question_still_single(self):
+        # 反向锁定：纯概念/疑问句式仍不编排（别被上面那条顺手放开）
+        for msg in ("周报的格式是什么", "周报怎么写", "周报包含哪些内容",
+                    "周报模板", "周报的例子"):
+            assert _needs_orchestration(msg) is False, f"「{msg}」被误判成要生成周报"
 
 
 class TestCoachClassify:
@@ -120,6 +169,46 @@ class TestCoachClassify:
     def test_pain_still_goes_to_chat(self):
         # 伤痛红线：仍走对话（不能被任何新白名单截去别处）
         assert _coach._classify("我膝盖疼还能跑吗") == "chat"
+
+    def test_plain_consult_goes_to_chat(self):
+        """回归（2026-09-17）：末尾兜底不能吞掉正常提问。
+
+        「我要去跑半马，有什么建议」正好 12 字，老实现只要能从句子里抠出片段
+        （name 非空）就判 analyze_strength，于是抠出伪动作名『去跑半马，』，
+        用户收到的回复是「『去跑半马，』还没记录过训练数据，先练一轮，练完用
+        『去跑半马， 4组8次60kg』这种格式告诉我」——他要的是半马备赛建议，
+        收到的却是让他去记录一个根本不存在的动作。
+        """
+        for msg in ("我要去跑半马，有什么建议", "我想跑半马，怎么准备",
+                    "跑半马要准备什么", "我想练胸，有什么建议"):
+            assert _coach._classify(msg) == "chat", f"「{msg}」被塞进固定模板"
+
+    def test_bogus_fragment_never_becomes_action_name(self):
+        # 标点必须算停用字：否则字符扫描跨过逗号继续抠，得出『去跑半马，』这种伪动作名
+        assert _coach._exercise_name("我要去跑半马，有什么建议") == "去跑半马"
+
+    def test_recorded_exercise_still_gets_trend(self, monkeypatch):
+        """反向锁定：消息里真出现**用户记录过的**动作时，仍走结构化趋势分析。
+
+        兜底从「抠出任意片段」收紧为「命中已入库动作名」，不能连正常查询一起收掉。
+        """
+        from src.agents import coach_agent
+        monkeypatch.setattr(
+            coach_agent._STORE, "strengths",
+            lambda: [{"date": "2026-09-01",
+                      "exercises": [{"name": "卧推", "sets": 4, "reps": 8, "weight_kg": 60}]}],
+        )
+        assert _coach._classify("卧推") == "analyze_strength"
+
+    def test_prompt_focus_only_for_known_targets(self):
+        """prompt 里不再把抠出来的片段拼成「XX训练日」。
+
+        focus 收紧前，「我要去跑半马，有什么建议」会让 prompt 出现
+        「请直接给一份具体的『去跑半马训练日』」——模型被要求排一个不存在的训练日。
+        """
+        assert "请直接给一份具体的" not in _coach._build_prompt("我要去跑半马，有什么建议")
+        # 部位词仍要保留训练日引导（别把 focus 收没了）
+        assert "练「胸」" in _coach._build_prompt("怎么练胸")
 
 
 class TestClassify:

@@ -3,6 +3,113 @@
 > 本文件由 README 拆出（2026-09-15）：README 只保留项目介绍 / 功能 / 架构 / 快速开始等当前状态，
 > 按时间的迭代记录统一放这里。
 
+### 2026-09-17 正常提问不再被塞进固定模板——测试 250 → **256 passed**
+
+问题来源：真机问「我要去跑半马，有什么建议」，拿到的回复是
+**「『去跑半马，』还没记录过训练数据，先别急着看趋势——没数据看个寂寞。先练一轮，练完用『去跑半马， 4组8次60kg』这种格式告诉我…」**
+——用户要的是半马备赛建议，收到的是让他去记录一个**根本不存在的动作**。目标很明确：这类正常提问就应该像正常 AI 一样自然回答。
+
+**根因（四处叠加，缺一处都不会触发）**
+· `_classify` 末尾兜底是「消息 ≤12 字 + `_exercise_name()` 非空 → 力量趋势分析」。它只要求「能从句子里抠出一个片段」，**不要求那是个动作名**；而这句话正好 12 字，恰好卡在阈值上。
+· `_CHAR_STOP`（抠动作名时的停用**字**集）不含标点 → 字符扫描跨过逗号继续抠，得出伪动作名 `'去跑半马，'`（带标点）。
+· `_detect_goal` 的问句护栏是 `goal.startswith(("怎么","如何","什么"…))`，**只判句首**。这句是「我想…」开头 + 问句结尾的混合句 → 整句被当成新训练目标：`USER.md` 的「当前训练目标」被写成 `去跑半马有什么建议`，`plans.json` 里还多出一份同名脏计划，之后每轮对话都带着这个错目标。
+· `_build_prompt` 拿同一个片段当 focus，prompt 里被拼成「请直接给一份具体的『**去跑半马训练日**』」——模型被要求排一个不存在的训练日。
+
+**修法**
+· 兜底收紧为**必须命中「已入库动作名」**：抽出 `_known_exercise_in()`（与 `_exercise_name` 策略A 同一份数据、同一口径），只有消息里真出现用户记录过的动作，才承认这是「查这个动作的趋势」，其余一律交回对话路径。
+· 标点（，。、；：！？… 及中英文引号括号空格）进 `_CHAR_STOP`，假动作名不再产生。
+· `_detect_goal` 的问句护栏改为**扫全句**：疑问/征求建议的词出现在任何位置都按问句处理（宁可不改目标，也不写错目标）。
+· `_build_prompt` 的 focus **只认「已入库动作名」或「身体部位词」**（「怎么练胸」仍会得到具体训练日，认不出来的就当普通问题自然回答）。
+· 顺带去掉 `_analyze_strength` 文案里写死的 `4组8次60kg`（用户没练过这个重量时，读起来像在复述他的记录）→ 改成 `动作 组数×次数×重量kg` 的通用格式。
+
+**顺带修掉一个既存隐患：`coach_agent.py` 缺 `import re`**
+该文件里 `_log_run` / `_log_strength` / `_build_prompt` 都在用 `re.`，却从来没有 `import re`（HEAD 版本就没有）。以前只有走到 `_build_prompt` 里「focus 为空」那条分支才会炸，所以一直没暴露；本次改动让这条分支变常用，才在测试里浮出来。用探针验证过：把模块里的 `re` 去掉，`_log_run("记一次5km跑步…")` 与 `_build_prompt(...)` **立刻 NameError**——也就是说「记一次5km跑步」若路由到 coach，本来会直接报错。
+
+**验证**
+· 测试 250 → **256 passed**（+6）：`test_intent.py` 新增「问句尾巴不算目标」「正常咨询走对话路径」「伪动作名不成立」「入库动作仍走分析」「prompt 不再拼出假训练日」。
+· 实机：`我要去跑半马，有什么建议` → `intent=direct_answer`（`via=llm`）→ coach 单 Agent **自然作答**（结合他的配速 6:00 / 平均心率 145 / 最大心率 190、Z2-Z3 分布、膝痛史、翼状肩胛、睡眠障碍给出备赛建议），**不再是模板**；跑完核对 `USER.md` 与 `plans.json` **无变化**（不再写脏目标、不再生成脏计划）。「怎么练胸」仍拿到具体胸训练日（部位词 focus 未受影响）。
+
+
+### 2026-09-16 复查 6 项修复（P0×1 / P1×2 / P2×2 / P3×1）——测试 223 → **250 passed**
+
+复查来源：`战狼养成计划_修复复查结论.md`（针对上一轮 9 项修复的复检）。6 项里最重的一条是**截图导入的闭环断在中间**：后端确实暂存了，前端却报「导入失败」。全部按优先级修完，每项补了回归测试，并用**「临时回退到旧行为 → 对应测试确实变红」**验过（6 处回退、**14 条用例同时变红**）。
+
+**P0 截图导入闭环断裂：后端已暂存、前端只看到「导入失败」**
+`/import-image` 返回 `{ok, data, saved:false, staged:bool}`，而前端 `importFile` 的成功分支只认 `res.saved` → 每次导入都掉进 else 的「导入失败」；就算显示成功，前端也拿不到记录本体（只有个 `staged` 布尔量），`pendingCommit` 永远是空，用户没有任何入库入口。
+修法：`_stage_import_data` 由返回 `bool` 改为返回**带 `_staged_id` 的记录本体**（暂存不了返回 `None`），端点新增 `staged_records`（记录数组）；前端加 `res.ok && res.staged` 分支，把记录塞进 `pendingCommit` 并提示「已解析，待确认——还没有入库」。`_staged_id` 是必需项：前端确认时把它回传 `/commit`，后端才能按 id 只清这一条（只给布尔量的话前端只能整队清空，多会话并发互相踩——上一轮 P0-1 修的正是这个）。连传两张截图时**累加**而非覆盖，否则卡片只报 1 条、另一条留在服务端再也提交不了。
+另补一个诚实分支：`res.ok` 但没进队（type 不认识 / 力量动作列表为空）时给可读原因，而不是让前端显示看不出所以然的「导入失败」。
+
+**P1 重写失败后，坏产出不带警告直接漏给用户**
+`rewrite_node` 重写失败时 `return {"results": results}`：产出原样留下、**评审意见原地蒸发**；而 `store.synthesize` 有个「最后成功步骤若是 planner 就直出」的捷径，于是那份**刚被评审判过没过**的产出被当成成品交出去，还附着一句空 issues。
+修法两条：① 重写失败改为 `return {"results": results, "review_issues": state.get("review") or ""}`，评审意见走 `review_issues` 通道传到综合层（`state["review"]` 只服务重写节点，综合层不读它）；② `synthesize` 的直出加**可交付判定** `_deliverable()`，命中空/哨兵/降级文案就不直出，落到汇总分支让主 Agent 基于其它步骤的有效产出重新收口。`_deliverable` **刻意不含长度阈值**——planner 的短产出也可能是完整结论，用长度判会误杀好产出（评审规则层历史上吃过误报的亏）。
+
+**P1 评审不可用被静默当成「评审通过」**
+`llm.chat` 吞异常返回降级文案，而 `_review_failed` 的判据是「首行不是 ISSUES 就算通过」→ 评审模型挂掉时，**质量门静默失效，对外仍表现成「已通过评审」**。
+修法：新增三态 `_review_verdict()`（`issues` / `pass` / `unavailable`），`review_rules.is_degraded()` 集中判定「没真正生成」（空 / 哨兵 / 两种降级文案），把「降级文案」的标记**收敛到一处**、两边共用；`OrchestrationState` 新增 `review_unavailable` 字段（**必须声明**，LangGraph 按 TypedDict 建通道，未声明的键会被静默丢弃——这个坑之前踩过），评审降级/异常时置位，`synthesize` 据此在成品末尾如实标注「⚠️ 评审服务暂不可用，本轮**未完成质量评审**（这不等于通过）」。
+顺带修首行协议解析：模型偶尔写成 `**ISSUES**` / `- ISSUES` / `> ISSUES`，精确 `startswith` 会漏判成通过 → 先剥行首 markdown 强调/引用/列表符号再判。
+
+**P2 暂存确认并发重复入库**
+`commit_staged` 是「读队首 → 写盘 → 删除」三段式，两个请求同时点确认会**双双读到同一条、双双写盘**，同一条训练记录进库两次。
+修法：`staged` 表加 `status` / `claimed_at` 两列（老库由 `_migrate()` 显式 `ALTER TABLE` 补列——`CREATE TABLE IF NOT EXISTS` **不会**补列），确认改为**原子抢占**：`UPDATE ... SET status='committing' WHERE seq=? AND status='staged'`，**只有 `rowcount == 1` 的调用者才有资格落库**（SQLite 写锁把两个 UPDATE 串行了），抢不到就看下一条、不整批放弃。落库失败调 `_release_claim()` 退回抢占，记录仍可重试；抢占带 **120s 租期**，抢占方进程被杀时记录不会卡在 `committing` 里谁也确认不了。
+
+**P2 `plans.json` 非原子写**
+`_PLANS_FILE.write_text(...)` 直接覆写：进程在写入中途被杀就留下**半个 JSON**，下次读取直接抛解析异常、整套计划打不开。
+修法：写同目录临时文件 + `os.replace()` 原子替换（同分区 rename 是原子操作），失败时清理临时文件。
+
+**P3 `reset_long_term` 行为与注释不一致**
+docstring 写「会话与向量一并清掉，避免残留脏召回」，实际只 `DELETE` 了 `entries` / `entries_fts`，**没碰 `session_messages`**。
+修法：按「重置演示数据」语义补上 `DELETE FROM session_messages`，并改准说明与影响范围。
+⚠️ 注意：`src/demo.py` 演示脚本开头就调它，**现在跑演示会连会话历史一起清空**。
+
+**验证**
+· 测试 223 → **250 passed**（+27）。新增 `tests/test_import_stage.py`（P0 截图导入闭环）；`test_graph.py` 加评审三态 / 重写失败传意见 / 坏产出不直出；`test_staged_store.py` 加并发确认抢占与租期回收；`test_plan_store.py` 加原子写；`test_memory.py` 加 reset 语义。
+· 测试有效性：临时把 6 处修复全部回退到旧行为 → **14 条用例确实变红**，恢复后 250 全绿。
+· 实机：8001 健康检查通过；截图导入的真实 OCR 路径**本机跑不到**——OCR 是可选依赖（`requirements-ocr.txt`，`ocr.py` 懒加载，未装时返回明确的安装提示），本机 venv 里 `Pillow / numpy / rapidocr` 都没装。改用**只桩掉 OCR、其余全真**（真 HTTP / 真 LLM 解析 / 真暂存库）的探针跑通契约：`staged_records` 带 `_staged_id`、`saved=false`、记录真实落在 `staged.db`。
+
+### 2026-09-16 代码审查 9 项修复（P0×2 / P1×4 / P2×3）——测试 197 → **223 passed**
+
+审查来源：`战狼养成计划_代码审查问题清单.md`（逐文件源码阅读，非运行时测试）。9 项各自独立，共同点是**都属"静默失败"**——用户看不到异常、数据或上下文在背后丢掉。按优先级全修，每项都补了回归测试，并用**「临时回退到旧行为 → 对应测试确实变红」**验过测试的有效性（9 条同时变红）。
+
+**P0-1 `/commit` 落库失败后暂存仍被清除 → 用户数据无声丢失**
+`_import_save` 落库失败时**只返回 `{"ok": False}`、不抛异常**，老实现不看返回值直接 `discard_staged(ids)`：记录既没进磁盘，又从待确认队列消失。
+修法：先判 `r.get("ok")`，失败直接返回 `{"ok": False, "kept": True, "msg": "落库失败，暂存记录已保留（可重试）", "detail": r}`；无 `records` 的分支也给 `commit_staged()` 包了 try/except（见 P1-6），不再退化成 500。
+前端配套：`commit()` 在 `kept` 为真时**不收掉待确认卡片**——后端保住了记录、界面却把重试入口关了，等于白保。
+
+**P0-2 前端 `applyEvent` 收到 `error` 事件不推消息 → 用户看到"转圈停了 + 页面空白"**
+`_supervise_stream` 的 error 事件带 `message`（如「编排失败：DeepSeek 超时」），老实现只把 thinking 标成 done。修法：把 `e.message`（兜底文案「编排失败，请稍后重试」）作为 assistant 消息推入 `messages`，让失败可见。
+
+**P1-3 `_detect_goal` 截断逻辑在 `idx == 0` 时失效**
+停用词出现在目标文本**开头**时（「我的目标是计划减脂」→ 取到 `"计划减脂"`，`"计划"` 在 idx 0），老写法 `if 0 < idx` 判假、不截断 → 训练目标变成一句鬼话，写进 `USER.md` 还顺带触发计划生成。
+修法：`if idx >= 0`；截断成空串后由既有的 `len(goal) < 2` 兜住返回 `None`（宁可不改目标，也别写错目标）。
+
+**P1-4 `rule_needs_orchestration` 被"格式"这类修饰词误杀**
+「帮我生成本周训练周报，格式好看一点」同时含「周报」和「格式」，老实现按概念询问判 `False`、不走编排 → 用户明确要周报，却拿到 coach 一人硬答。
+修法：判序改为 **强疑问句式（`_REPORT_ASK_KW`）→ 产出动作词（`_REPORT_ACT_KW`）→ 其余概念词 → 默认编排**。拆两组是因为「写」既在「怎么写」也在「写个周报」里，顺序反了就会误判。注意影响面：这条规则是 `intent.classify` 的**兜底路径**（mock 模式或 LLM 分类失败时才走），主路径仍是 LLM 分类。
+
+**P1-5 `plan_store.apply_pending("replace")` 残留 `pending-` 前缀 ID**
+`set_pending` 给的 id 是 `"pending-xxxx"`，而 replace 分支写的是 `pending.get("id") or f"plan-..."` → 前半段永远命中，落进 `plans` 列表的计划带着 `pending-` 前缀，与其它 `plan-` 计划不一致（前端若按 ID 前缀区分 pending/active 就会踩到）。修法：该分支强制 `f"plan-{uuid4().hex[:8]}"`（`add` 分支一直是重新生成的）。
+
+**P1-6 `SportStore._save` 写盘失败静默吞掉 + `commit_staged` 先出队再落库**
+`_save` 失败只打一行 stdout 就照常返回 `rec`，调用方以为存成功了；而 `commit_staged` 是**先 `_pop_first_staged()` 再落库**，写盘一失败这条记录就永久消失（磁盘满 / 权限 / 路径异常都会走到）。
+修法两层：① `_save` 失败**抛 `IOError`**（日志保留）；② 内部辅助改成**只读的 `_first_staged()`**，`commit_staged` 变成「先落库、**成功了才出队**」——失败时记录原样留在暂存，用户可重试。配套在 `/chat` 的单 Agent 路径把 `IOError` 映射成 `503 + "训练记录没能写入本地磁盘"`，而不是一句看不出所以然的 500（`_coach_answer` 之外的直记路径，如「记录5km跑步」，正是走这里）。
+
+**P2-7 `llm.chat()` 吞掉所有异常，日志分不清超时 / 401 / 429**
+`_post_json` 内部已区分 4xx（不重试）与 5xx（重试），到了 `chat()` 全被吞成一句降级文案。修法：`print(f"[LLM] 调用失败: {type(e).__name__}: {e}")`，**客户端文案不变**（用户不该看到异常堆栈）。
+
+**P2-8 `/chat` 编排路径只 append 最终成品，子 Agent 中间产出丢失**
+用户追问「为什么你这么建议」时，session 历史里只有成品、没有 searcher 查到什么 / analyst 算了什么，追问的上下文是断的。
+修法：新增 `_summarize_events()`，把各 `agent_done` 的 `output` 拼成**一条** `[编排过程]` 摘要（每个子 Agent 截断 400 字）先入 session，再写最终成品——顺序反映真实发生次序。**一条而不是每个 agent 一条**：session 是 `SESSION_LIMIT=50` 的滚动窗口，一次编排写 4 条会把真实历史挤掉。
+
+**P2-9 编排的 LLM 调用硬吃默认 60s 超时**
+`chat()` 根本没有 `timeout` 参数（`_post_json` 有，但没人往下传），拆解阶段卡满 60s 会把 SSE 连接拖到中间层（Nginx / 浏览器）先超时断开——前端只看到转圈，**连 error 事件都收不到**（正好是 P0-2 想显示的那种失败）。
+修法：`chat()` 新增 `timeout=60` 并透传给 `_post_json`；`graph.py` 的拆解显式 `timeout=15`（只输出一段 JSON，不需要 60s）、综合 `timeout=30`（要读全部子 Agent 产出、输出最长，比拆解给得多但仍短于默认）。
+
+**验证**
+- 测试 197 → **223 passed**（+26）：新增 `tests/test_commit_guard.py`（P0-1 / P1-6，含"把落盘目录变成一个普通文件"来强制写盘失败）、`tests/test_llm_timeout.py`（P2-7 / P2-9，打桩 `_post_json` / `llm.chat` 捕获实参 kwargs）、`tests/test_session_context.py`（P2-8，含端点级"摘要与成品都在 session 里、顺序正确"），并在 `test_intent.py` / `test_plan_store.py` 补 P1-3 / P1-4 / P1-5 的回归。
+- **测试有效性**：把 8 处修复临时回退到旧行为 → **9 条用例确实变红**（P0-1、P1-3、P1-4、P1-5、P1-6×3、P2-8、P2-9 各一条），恢复后 223 全绿。
+- **实机验证**（真实 DeepSeek，8001）：`/commit` 传一条无法保存的记录 → `{"ok":false,"kept":true,"msg":"落库失败，暂存记录已保留（可重试）"}`；空队列 → `{"ok":false}`（不带 `kept`）；「我的目标是计划减脂」→ 走 coach 直答，`USER.md` md5 前后一致、没有产生脏计划；编排「帮我总结一下这周的训练」18.7s 正常（`analyst/planner/reviewer/planner`），session 里写入了 **1 条 683 字的 `[编排过程]` 摘要，4 个子 Agent 产出齐全**，随后是成品；服务日志 `[LLM] 调用失败` 计数为 **0**（说明 15s 的拆解预算在本机够用，没有静默回退到兜底拆解）。
+- 前端 `npm run build` 通过（166 modules）；注意本项目 `build` 只有 `vite build`、**没有类型检查步骤**，类型问题不会被构建拦住。
+
 ### 2026-09-16 暂存队列迁 SQLite（方案 P2，按永健拍板的口径实施）——测试 182 → **197 passed**
 
 **为什么没照方案原文做**：方案写的是「`_STAGED` 队列替换为 `interrupt_before`」。评估后确认**替换不了**，原因四条：① 编排图是无 checkpointer 的 `g.compile()`，interrupt/resume 必须新增检查点并把 `thread_id` 接进 config；② `_STAGED` 的写入者不只在图里——`app.py:_stage_import_data`（图片导入）**根本不在任何图中**，所以 `_STAGED` 删不掉，照做只会变成**两套机制并存**；③ 用户确认之后没有任何图内工作，resume 只是结束图，interrupt 只增加检查点与 thread 映射、**行为不变**；④ 会动 `/chat` 响应契约与前端 `useAgentChat.ts` 对 `pending_commit` 的渲染（外部契约）。

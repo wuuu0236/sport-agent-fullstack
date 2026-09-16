@@ -41,6 +41,23 @@ _SECTION_RULES = (
 )
 
 
+def is_degraded(text: str) -> bool:
+    """文本是否命中「没真正生成」的机械标记（空 / 哨兵 / 降级文案）。
+
+    评审侧靠它区分「**评审通过**」与「**评审压根没跑成**」：评审模型不可用时
+    `llm.chat` 会吞掉异常、返回降级文案，而老实现「首行不是 ISSUES 就算通过」
+    会把这种情况静默读成通过——质量门在评审服务挂掉时形同不存在。
+
+    标记集中在这里、两边共用：以后新增一种降级文案，只改一处就不会漏。
+    """
+    t = text or ""
+    if not t.strip():
+        return True
+    if _SENTINEL in t:
+        return True
+    return any(marker in t for marker in _DEGRADED)
+
+
 def check(task: str, output: str, upstream: dict = None) -> dict:
     """检查产出，返回 {"blocking": [...], "hints": [...]}。
 

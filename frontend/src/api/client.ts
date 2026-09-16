@@ -148,7 +148,9 @@ export async function discardPending(): Promise<{ ok: boolean; msg?: string }> {
 }
 
 // 确认暂存记录入库（主 Agent 编排后用户点「确认」→ 后端 /commit 落库）
-export async function commitRecords(records?: any[]): Promise<{ ok: boolean; msg?: string }> {
+export async function commitRecords(
+  records?: any[],
+): Promise<{ ok: boolean; msg?: string; kept?: boolean }> {
   const { data } = await http.post('/commit', records ? { records } : {})
   return data
 }

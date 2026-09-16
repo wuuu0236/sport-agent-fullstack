@@ -26,6 +26,8 @@
 "我的心率区间是多少"这类问句经 `_classify` 判定为 `analyze_run`，走的就是那条代码路径
 （P1-3 实测发现，见 CHANGELOG）。
 """
+import re
+
 from .base import BaseAgent
 from .. import config, llm, memory
 from ..skill_loader import match_skills_for, skill_block
@@ -221,10 +223,14 @@ class CoachAgent(BaseAgent):
                 f"\n建议：有氧 base(Z2+Z3) 为主说明恢复充分；若 Z4/Z5 占比高，下次安排恢复跑或休息。")
 
     # 动作名提取时的停用字（代词/助词/意图词），避免「我深蹲有进步吗」取到『我』
+    # 标点也必须算停用字：不含标点时字符扫描会跨过逗号继续抠，
+    # 「我要去跑半马，有什么建议」抠出的是带逗号的伪动作名『去跑半马，』，
+    # 再被当成动作名去查趋势、拼进 prompt（2026-09-17 修）。
     _CHAR_STOP = frozenset(
         "我你他她它们有没是否在来了吗么吧啊呀呢的得地很还也都就"
         "要想看看帮我最近一下进步分析力量训练容量趋势负荷怎么如何多少"
-        "几次今天昨天上次这次那个这个再帮给让咱咱们您什刚才")
+        "几次今天昨天上次这次那个这个再帮给让咱咱们您什刚才"
+        "，。、；：！？…,.!?;:（）()【】「」“”\"'　 ")
 
     # 伤痛 / 康复关键词。
     # 重要：意图分类（_classify）与提示词构建（_build_prompt）必须共用这一份，
@@ -240,10 +246,14 @@ class CoachAgent(BaseAgent):
         """是否伤痛 / 康复类消息。分类与提示词构建共用同一个判断。"""
         return any(k in msg for k in cls._PAIN_WORDS)
 
-    def _exercise_name(self, msg):
-        """从消息里提取动作名。策略A用已入库的动作名精确匹配（最稳，不依赖分词）；
-        策略B做字符级扫描兜底（冷启动无记录时也够用）。"""
-        # A：消息里含已入库的动作名 → 直接命中，取最长（避免「卧推」误中「卧推车」）
+    def _known_exercise_in(self, msg):
+        """消息里是否直接含**已入库**的动作名，返回命中的名字（取最长，避免「卧推」
+        误中「卧推车」），没命中返回 ""。
+
+        和 `_exercise_name` 的策略A 是同一份数据、同一个口径，抽出来给
+        `_classify` / `_build_prompt` 用——它们需要区分「这是用户练过的某个动作」
+        和「从句子任意位置抠出来的片段」，凭后者做判断会答非所问。
+        """
         known = []
         for r in _STORE.strengths():
             for ex in r.get("exercises", []):
@@ -253,6 +263,15 @@ class CoachAgent(BaseAgent):
         for k in sorted(known, key=len, reverse=True):
             if k in msg:
                 return k
+        return ""
+
+    def _exercise_name(self, msg):
+        """从消息里提取动作名。策略A用已入库的动作名精确匹配（最稳，不依赖分词）；
+        策略B做字符级扫描兜底（冷启动无记录时也够用）。"""
+        # A：消息里含已入库的动作名 → 直接命中，取最长（避免「卧推」误中「卧推车」）
+        hit = self._known_exercise_in(msg)
+        if hit:
+            return hit
         # B1：优先取「进步/分析」前面的词：深蹲有进步吗 → 深蹲
         for key in ("进步", "分析"):
             i = msg.find(key)
@@ -286,9 +305,11 @@ class CoachAgent(BaseAgent):
                     "——我来算渐进超负荷趋势。")
         t = _STORE.strength_trend(name)
         if t["trend"] == "first":
+            # 示例里不写死具体重量：老文案固定写「4组8次60kg」，用户从没练过这个
+            # 重量时，这句读起来像在复述他的记录（2026-09-17 改）。
             return (f"『{name}』还没记录过训练数据，先别急着看趋势——没数据看个寂寞。\n"
-                    f"先练一轮，练完用『{name} 4组8次60kg』这种格式告诉我，"
-                    f"下次就能给你算渐进超负荷了。\n"
+                    f"先练一轮，练完按『{name} 组数×次数×重量kg』的格式发我"
+                    f"（重量按你实际用的填），下次就能给你算渐进超负荷了。\n"
                     f"要不要现在直接给你排一份「{name}训练日」？说一声我马上排。")
         arrow = {"up": "↑ 容量在涨（渐进超负荷，进步中）",
                  "down": "↓ 容量下降（可能减载/疲劳，注意恢复）",
@@ -357,8 +378,13 @@ class CoachAgent(BaseAgent):
         name = self._exercise_name(msg)
         if name and self._is_body_part(name):
             return "chat"
-        # 简短且含具体动作名、无上述意图 → 仍按力量分析兜底（历史行为）
-        if len(msg) <= 12 and name:
+        # 简短 + 含**已入库**动作名、又无上述意图 → 才按力量分析兜底（历史行为）。
+        # 老实现只要求「能抠出一个片段」（name 非空）：「我要去跑半马，有什么建议」
+        # 正好 12 字、抠出伪动作名『去跑半马，』，就被当成查趋势，答出
+        # 「『去跑半马，』还没记录过训练数据，先练一轮…」——正常提问被硬塞进模板。
+        # 现在只有消息里真的出现用户记录过的动作，才承认这是「查这个动作的趋势」；
+        # 认不出来的一律交回对话路径，让教练像正常 AI 一样回答。
+        if len(msg) <= 12 and self._known_exercise_in(msg):
             return "analyze_strength"
         return "chat"
 
@@ -388,8 +414,16 @@ class CoachAgent(BaseAgent):
         recent = _STORE.analyze_run(runs[-1], max_hr) if runs else None
         data = (f"用户最大心率基线：{max_hr}。\n"
                 f"最近跑步分析：{recent}\n" if recent else "尚无跑步记录。")
-        # 提取用户想练的部位/动作，引导给出具体训练日而非泛泛而谈
-        focus = self._exercise_name(msg)
+        # 提取用户想练的部位/动作，引导给出具体训练日而非泛泛而谈。
+        # **只认「已入库的动作名」或「身体部位词」**：老实现拿任意抠出来的片段当
+        # focus，「我要去跑半马，有什么建议」抠出『去跑半马』，prompt 里就变成
+        # 「请直接给一份具体的『去跑半马训练日』」——模型被要求去排一个不存在的
+        # 训练日（2026-09-17 修）。认不出来就当普通问题，让它自然回答。
+        focus = self._known_exercise_in(msg)
+        if not focus:
+            name = self._exercise_name(msg)
+            if name and self._is_body_part(name):
+                focus = name
         if not focus:
             m = re.search(r"练([一-龥]{1,3})", msg)
             if m and self._is_body_part(m.group(1)):

@@ -41,6 +41,9 @@ def hr_zone(pct: float) -> str:
 #     靠人工记得加锁，漏一次就是竞态）。
 #   · 每条暂存记录仍带唯一 _staged_id：前端确认时按 id 精确清除自己的记录，
 #     不会把其他会话/请求的暂存一起清掉。
+#   · 确认侧是「**原子抢占 + 先落库后出队**」（2026-09-16 复查补的）：status 字段
+#     把「写盘途中」显式化，避免两个请求同时确认时把同一条记录写进训练库两次；
+#     抢占用租期兜底，抢占方崩溃不会让记录永久卡死。详见 _claim_first_staged。
 # 范围提醒：训练记录本身（runs / strengths）仍是 data/sessions 下的 JSON，本次不动，
 #           只迁暂存队列——改动面越小越好验证。
 # ---------------------------------------------------------------------------
@@ -61,9 +64,24 @@ CREATE TABLE IF NOT EXISTS staged (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
     staged_id  TEXT NOT NULL UNIQUE,
     payload    TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'staged',
+    claimed_at TEXT
 );
 """
+
+# 老库（P2 首版）只有前四列。CREATE TABLE IF NOT EXISTS 不会补列，得显式 ALTER。
+_MIGRATIONS = (
+    "ALTER TABLE staged ADD COLUMN status TEXT NOT NULL DEFAULT 'staged'",
+    "ALTER TABLE staged ADD COLUMN claimed_at TEXT",
+)
+_MIGRATED = set()
+
+# 确认状态的取值：staged = 待确认；committing = 已被某次确认抢占（正在写盘）。
+_ROWS = "status='staged'"
+# 抢占租期（秒）：抢占方写盘途中进程被杀，记录会停在 committing、谁也确认不了。
+# 超过租期即视为「抢占方已死」，下一次确认自动收回重试。
+_CLAIM_LEASE = 120
 
 
 @contextmanager
@@ -96,10 +114,28 @@ def _staged_db():
             pass  # 并发首次建库时别人正在切 WAL；不吃 busy_timeout，容忍即可
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(_SCHEMA)
+        _migrate(conn, path)
         yield conn
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate(conn, path) -> None:
+    """给老库补列（`CREATE TABLE IF NOT EXISTS` 不会补，必须显式 ALTER）。
+
+    每个库路径只跑一次，靠模块级集合记；断言失败（列已存在）直接忽略。
+    为什么不每次跑：正常路径上这些 ALTER 必然失败，白付两次异常开销。
+    """
+    key = str(path)
+    if key in _MIGRATED:
+        return
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass  # 列已存在
+    _MIGRATED.add(key)
 
 
 def _stage(rec: dict) -> dict:
@@ -122,15 +158,48 @@ def staged_records() -> list:
     return [json.loads(r["payload"]) for r in rows]
 
 
-def _pop_first_staged():
-    """取出队首记录并移除（FIFO）；队列为空返回 None。"""
+def _claim_first_staged():
+    """**原子抢占**队首待确认记录并返回（FIFO）；无可抢占记录时返回 None。
+
+    抢占 = 把 status 从 staged 改成 committing，**只有 UPDATE 影响行数为 1 的调用者
+    才有资格落库**。两个请求同时确认时，第二个的 UPDATE 会拿到 rowcount=0（SQLite 的
+    写锁把两个 UPDATE 串行化了），于是它去看下一条——同一条记录只会被写进训练库一次。
+    老实现是「都读到队首 → 都写盘 → 都删除」，并发确认会重复入库。
+
+    刻意不在这里删除：`commit_staged` 要「先落库、成功了才出队」，删除由落库之后
+    单独做。老实现是「先 pop 再落库」，落库失败时记录既没进磁盘、又不在暂存里
+    → 用户数据无声丢失（越界数组、磁盘满、权限问题都会走到这条）。
+    """
+    now = datetime.datetime.now()
+    now_s = now.isoformat(timespec="seconds")
+    lease_cut = (now - datetime.timedelta(seconds=_CLAIM_LEASE)).isoformat(timespec="seconds")
     with _staged_db() as conn:
-        row = conn.execute(
-            "SELECT seq, payload FROM staged ORDER BY seq LIMIT 1").fetchone()
-        if row is None:
-            return None
-        conn.execute("DELETE FROM staged WHERE seq=?", (row["seq"],))
-        return json.loads(row["payload"])
+        # 崩溃兜底：收回过期抢占。正常路径上一条都收不到。
+        conn.execute(
+            "UPDATE staged SET status='staged', claimed_at=NULL "
+            "WHERE status='committing' AND (claimed_at IS NULL OR claimed_at < ?)",
+            (lease_cut,))
+        while True:
+            row = conn.execute(
+                f"SELECT seq, payload FROM staged WHERE {_ROWS} ORDER BY seq LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            claimed = conn.execute(
+                "UPDATE staged SET status='committing', claimed_at=? "
+                f"WHERE seq=? AND {_ROWS}", (now_s, row["seq"])).rowcount
+            if claimed == 1:
+                return json.loads(row["payload"])
+            # 被别的连接抢先了：继续看下一条，别退化成「整批放弃」
+
+
+def _release_claim(staged_id: str) -> None:
+    """把抢占退回去（落库失败时调用），让这条记录还能被重试确认。"""
+    if not staged_id:
+        return
+    with _staged_db() as conn:
+        conn.execute("UPDATE staged SET status='staged', claimed_at=NULL "
+                     "WHERE staged_id=?", (staged_id,))
 
 
 def _discard_staged(ids: list = None) -> int:
@@ -191,20 +260,45 @@ class SportStore:
         return staged_records()
 
     def commit_staged(self) -> int:
-        """确认提交：把暂存记录按入队顺序全部落库，返回条数。"""
+        """确认提交：把暂存记录按入队顺序全部落库，返回条数。
+
+        两条不变式：
+        1. **先落库、成功了才出队**。落库抛异常时记录仍留在暂存里（`_save` 已改成
+           失败即抛，不再静默），调用方 /commit 据此提示「暂存记录已保留」并让用户
+           重试；老实现先出队再落库，失败就两头落空。
+        2. **一条记录只落库一次**。每轮先原子抢占（staged → committing）再写盘，
+           两个请求同时确认时不会双双写到同一条；老实现是「都读到队首、都写盘、
+           都删除」，并发下会重复入库。
+        """
         n = 0
         while True:
-            rec = _pop_first_staged()
+            rec = _claim_first_staged()
             if rec is None:
                 break
-            if rec.get("type") == "run":
-                self.add_run(rec["date"], rec.get("distance_km") or 0,
-                             rec.get("duration_min") or 0, rec.get("avg_hr") or 0,
-                             rec.get("max_hr") or 0, hr_series=rec.get("hr_series"),
-                             rpe=rec.get("rpe") or 0, note=rec.get("note") or "")
-            elif rec.get("type") == "strength":
-                self.add_strength(rec["date"], rec.get("exercises") or [],
-                                  rpe=rec.get("rpe") or 0, note=rec.get("note") or "")
+            sid = rec.get("_staged_id")
+            if not sid:
+                # 理论上不会发生（_stage 一定写 _staged_id）。真出现就抛出去：
+                # 静默跳过会让这条记录永远占着队首、这轮 while 原地死循环。
+                # 它会被抢占租期收回去（拿不到 id 就没法精确退抢占），
+                # 但至少不会静默丢数据或死循环。
+                raise RuntimeError(
+                    f"暂存记录缺少 _staged_id，无法出队：type={rec.get('type')}")
+            try:
+                if rec.get("type") == "run":
+                    self.add_run(rec["date"], rec.get("distance_km") or 0,
+                                 rec.get("duration_min") or 0, rec.get("avg_hr") or 0,
+                                 rec.get("max_hr") or 0, hr_series=rec.get("hr_series"),
+                                 rpe=rec.get("rpe") or 0, note=rec.get("note") or "")
+                elif rec.get("type") == "strength":
+                    self.add_strength(rec["date"], rec.get("exercises") or [],
+                                      rpe=rec.get("rpe") or 0, note=rec.get("note") or "")
+            except Exception:
+                # 落库失败：把抢占退回去再往上抛，记录仍可重试
+                # （不退的话它会卡在 committing 里，用户点确认只会「暂存区为空」）。
+                _release_claim(sid)
+                raise
+            # 落库成功后才出队
+            _discard_staged([sid])
             n += 1
         return n
 
@@ -221,8 +315,11 @@ class SportStore:
             with open(fn, "w", encoding="utf-8") as f:
                 json.dump(rec, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            # 训练记录写失败绝不能静默：用户练了但库里没有，属于无声数据丢失
+            # 训练记录写失败绝不能只打一行 stdout 就照常返回：调用方（add_run /
+            # add_strength / commit_staged）会以为存成功了，用户练了但库里没有，
+            # 属于无声数据丢失。改为抛出，由调用方决定「保留暂存 / 报错」。
             print(f"[SportStore] 训练记录落盘失败 {fn.name}: {e}", flush=True)
+            raise IOError(f"训练记录落盘失败: {e}") from e
 
     # ---------- 读取 ----------
     def all(self):

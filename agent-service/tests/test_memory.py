@@ -119,6 +119,33 @@ class TestSqliteMigration:
         memory.reset_long_term()
         assert MemoryStore().list_store("user") == []   # 没被二次导入
 
+    def test_reset_clears_session_as_well(self, store):
+        """reset_long_term 的语义是「重置演示数据」：会话历史也要清。
+
+        老实现注释写着「会话与向量一并清掉」，实际只删 entries——会话残留会被当成
+        历史上下文带进下一轮演示，演示不可重复（注释与行为不一致，读代码的人会信注释）。
+        """
+        store.remember("user", "一条长期记忆")
+        memory.append_session("user", "上一轮演示的问题")
+        memory.append_session("assistant", "上一轮演示的回答")
+        assert len(memory.load_session()["messages"]) == 2
+
+        memory.reset_long_term()
+
+        # 用**全新实例**读：`MemoryStore` 把条目缓存在实例里，拿旧实例查会读到缓存
+        # （缓存没刷新，看着像「没清掉」——那是查法不对，不是没清）。
+        assert MemoryStore().list_store("user") == []
+        assert memory.load_session()["messages"] == []
+
+    def test_reset_keeps_migration_marker(self, store, tmp_path):
+        """重置不能把迁移标记一起清掉：清了的话重启后旧 Markdown 会被重新灌回来。"""
+        (tmp_path / "USER.md").write_text("会被导入一次", encoding="utf-8")
+        with memory._db() as conn:
+            conn.execute("DELETE FROM meta WHERE k='md_migrated'")
+            memory._migrate_markdown(conn)
+        memory.reset_long_term()
+        assert MemoryStore().list_store("user") == []      # 没被二次导入
+
     def test_markdown_view_is_written_but_not_read(self, store, tmp_path):
         """Markdown 退化为只读视图：写入后同步，但读取一律以 SQLite 为准。"""
         store.remember("user", "从 SQLite 来的一条")

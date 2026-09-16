@@ -95,7 +95,14 @@ export function useAgentChat(opts: {
       pendingCommit.value = { count: e.count, records: e.records }
       t.thinking!.status = 'done'
     } else if (e.type === 'error') {
+      // error 事件带 message（如「编排失败：DeepSeek 超时」）。以前只把 thinking 标 done，
+      // 用户看到的是「转圈停了 + 页面空白」，属于无感知失败——这里把原因说出来。
       t.thinking!.status = 'done'
+      messages.value.push({
+        role: 'assistant',
+        text: e.message || '编排失败，请稍后重试',
+        agent: 'supervisor',
+      })
     }
   }
 
@@ -162,6 +169,29 @@ export function useAgentChat(opts: {
         if (d.type === 'run') summary = `已导入跑步：${d.distance_km} km / ${d.duration_min} 分`
         else if (d.type === 'strength') summary = `已导入力量训练（${(d.exercises || []).length} 个动作）`
         messages.value.push({ role: 'assistant', text: '[已导入] ' + summary })
+      } else if (res && res.ok && res.staged) {
+        // 后端已改成「先暂存、确认后入库」：saved 恒为 false，成功信号是 staged。
+        // 以前只认 res.saved，于是每次导入都掉进下面的「导入失败」分支——
+        // 后端明明有待确认记录，用户却只看到失败、也找不到入库入口（闭环断在中间）。
+        const d = res.data || {}
+        let summary = '一条训练记录'
+        if (d.type === 'run') summary = `跑步：${d.distance_km} km / ${d.duration_min} 分`
+        else if (d.type === 'strength') summary = `力量训练（${(d.exercises || []).length} 个动作）`
+        // 累加而不是覆盖：连传两张截图时，后一张不能把前一张的待确认记录顶掉
+        // （否则卡片只报 1 条，另一条留在服务端、再也提交不了）。
+        const prev = pendingCommit.value?.records || []
+        const merged = prev.concat(res.staged_records || [])
+        pendingCommit.value = { count: merged.length, records: merged }
+        messages.value.push({
+          role: 'assistant',
+          text: `[已解析，待确认] ${summary}\n还没有入库：请核对下方「待确认训练记录」，无误后再点确认。`,
+        })
+      } else if (res && res.ok) {
+        // 解析成功但没能进待确认队列（类型不认识 / 力量动作列表为空）
+        messages.value.push({
+          role: 'assistant',
+          text: '[未入库] ' + (res.save_error || '已解析出内容，但不属于可入库的训练记录类型'),
+        })
       } else if (res && res.raw) {
         messages.value.push({
           role: 'assistant',
@@ -183,6 +213,9 @@ export function useAgentChat(opts: {
     try {
       const r = await commitRecords(recs?.length ? recs : undefined)
       messages.value.push({ role: 'assistant', text: r.msg || '已处理', agent: 'supervisor' })
+      // 后端落库失败时返回 ok:false + kept:true（暂存记录仍留在服务端）——
+      // 此时别把待确认卡片收掉，否则记录虽在、用户却找不到重试入口。
+      if (r.kept) return
     } catch (e) {
       messages.value.push({ role: 'assistant', text: '确认失败：' + String(e), agent: 'supervisor' })
     }

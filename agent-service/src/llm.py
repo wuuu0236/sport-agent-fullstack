@@ -68,11 +68,15 @@ def _post_json(url: str, payload: dict, timeout: int = 60,
 
 
 def chat(messages, model=None, temperature=0.7, max_tokens=2048, thinking="disabled",
-         base_url=None, api_key=None):
+         base_url=None, api_key=None, timeout=60):
     """messages: [{"role":"system"|"user"|"assistant", "content": "..."}]
 
     base_url / api_key 可覆盖默认供应商：评审 Agent 用第二个厂商的模型做反方
     （消除同模型自评偏差，见方案 P1-1）时走这两个参数。
+
+    timeout：单次请求超时秒数。默认 60 偏长——编排的「拆解」阶段只是输出一段 JSON，
+    卡满 60 秒会把 SSE 连接拖到中间层超时断开（前端只看到转圈，连 error 事件都收不到），
+    所以拆解显式传 15、综合传 30（见 src/graph.py）。
 
     thinking：DeepSeek V4 思考模式开关（"disabled" / "enabled"），默认关闭。
     默认关闭的原因（2026-08-30 实测）：V4 默认 enabled + high 强度，链式推理会把
@@ -91,9 +95,12 @@ def chat(messages, model=None, temperature=0.7, max_tokens=2048, thinking="disab
         "thinking": {"type": thinking},
     }
     try:
-        data = _post_json(url, payload, api_key=api_key)
+        data = _post_json(url, payload, timeout=timeout, api_key=api_key)
         return data["choices"][0]["message"]["content"].strip()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        # 降级文案是给用户看的，但排查线上问题时只看到「LLM 暂时不可用」根本分不清
+        # 是超时、401 鉴权还是 429 配额。异常类型与原因进服务端日志（客户端文案不变）。
+        print(f"[LLM] 调用失败: {type(e).__name__}: {e}", flush=True)
         return ("（LLM 暂时不可用，已降级）请稍后再试，或检查 .env 中的 "
                 "LLM_API_KEY / LLM_BASE_URL 配置。")
 

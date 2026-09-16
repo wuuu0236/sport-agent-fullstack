@@ -45,8 +45,26 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
+    """原子写：先写同目录临时文件，再 `os.replace` 顶替目标文件。
+
+    为什么不能直接 `write_text` 覆盖：写入途中崩溃/断电会留下**半个 JSON**，而
+    `_load` 解析失败会静默退化成「空计划库」——下一次任何写操作就把空库写回去，
+    用户的计划全丢（而且看不出是谁弄丢的）。
+    `os.replace` 在同一分区上是原子的：目标文件要么是旧内容、要么是新内容，
+    永远读不到半截。
+    """
     config.CONFIG.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    _PLANS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = _PLANS_FILE.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(_PLANS_FILE)          # 同目录 → 同分区 → 原子替换
+    except Exception:
+        # 失败时清掉半截临时文件：留着它下次可能被当成计划库读走
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def list_plans() -> dict:
@@ -118,7 +136,11 @@ def apply_pending(action: str) -> dict:
                     replaced = True
                     break
             if not replaced:
-                pending["id"] = pending.get("id") or f"plan-{uuid.uuid4().hex[:8]}"
+                # 必须重新生成 plan- 前缀 ID：pending 的 id 是 set_pending 给的
+                # "pending-xxxx"，老写法 `pending.get("id") or f"plan-..."` 永远命中前半段，
+                # 于是进 plans 列表的计划带着 pending- 前缀，与其它 plan- 计划不一致
+                # （前端若按 ID 前缀区分 pending/active 就会踩到）。add 分支一直是重新生成的。
+                pending["id"] = f"plan-{uuid.uuid4().hex[:8]}"
                 data["plans"].append(pending)
                 data["activeId"] = pending["id"]
             data["pending"] = None
