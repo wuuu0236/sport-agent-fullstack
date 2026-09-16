@@ -25,6 +25,16 @@ from . import config
 
 SKILL_DIR = config.BASE_DIR / "skills"
 _CACHE = None  # 启动后缓存，避免每次请求都扫盘
+# 注册表版本号：每次重建 _CACHE 自增。
+# 基类那份「技能目录」字符串缓存靠它判断该不该重建——否则 `存技能` 之后目录永不刷新，
+# LLM 根本不知道新技能存在（P1-3 修：此前 _CATALOGUE_CACHE 一旦算过就再也不更新，
+# `_invalidate_catalogue()` 定义了却没有任何调用点）。
+_REGISTRY_VERSION = 0
+
+
+def registry_version() -> int:
+    """当前技能注册表版本（技能增删改一次就 +1）。"""
+    return _REGISTRY_VERSION
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.S)
 # 蒸馏命令识别
@@ -60,7 +70,7 @@ def _parse_frontmatter(text: str):
 
 def load_skills(force: bool = False):
     """扫描并缓存所有 skill。返回 [{name, description, summary, triggers, agent, body}]。"""
-    global _CACHE
+    global _CACHE, _REGISTRY_VERSION
     if _CACHE is not None and not force:
         return _CACHE
     skills = []
@@ -78,6 +88,7 @@ def load_skills(force: bool = False):
                     "body": body,
                 })
     _CACHE = skills
+    _REGISTRY_VERSION += 1
     return skills
 
 

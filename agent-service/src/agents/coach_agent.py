@@ -1,6 +1,34 @@
-"""专业教练 Agent：训练记录录入 + 心率/力量分析 + 结构化日志 + 周期化建议。"""
+"""专业教练 Agent：训练记录录入 + 心率/力量分析 + 结构化日志 + 周期化建议。
+
+## 人格分层（方案 P1-3，2026-09-16）
+
+谭成义的 system prompt 显式拆成两层，**可写性完全不同**——这是防「自进化把人格改跑偏」的
+结构保证，不是命名洁癖：
+
+- **基础人格层（`CoachAgent.PERSONA_CORE`）**：身份 / 核心原则 / 动作铁律 / 表达风格 /
+  边界声明。蒸馏出来的"骨架"，**只允许人工改代码**。`存技能` 与 `patch 技能` 都只落盘到
+  `skills/` 目录，**没有任何代码路径能写进这个常量**，所以模型自进化不可能污染人格。
+  要调整人格 → 改 `PERSONA_CORE` 并走代码评审（改动会出现在 diff 里，能被 review 拦住）。
+- **补充知识层**：不在这份代码里，而在 `skills/` 下归属 coach 的 SKILL.md
+  （frontmatter `agent: coach`，如 `coach_hr_zones`；目录名 `coach_*` 是命名习惯）。
+  运行时由 `skill_loader.match_skills_for` 按触发词命中，注入到 prompt。
+  想让谭成义学到新知识 → `存技能：…` / `patch 技能 coach_xxx：…`，下次对话即生效，
+  人格层字节不变。
+
+## 这条链路的能力边界（实测，别过度承诺）
+
+体力活是**确定性代码**干的：跑步/力量记录的解析、心率区间数值、TRIMP、容量趋势都在
+`sport_data.py` 里，**不消费技能**。知识层影响的是 **LLM 生成的那部分**——对话回答、
+以及结构化结果之后追加的那句个性化建议。
+
+因此「patch 技能 coach_hr_zones 新增 Z5 判断条件」改的是**判读口径**，
+**不是** `sport_data.ZONES` 里的数值边界：数值边界属可计算契约，要改得改代码。
+"我的心率区间是多少"这类问句经 `_classify` 判定为 `analyze_run`，走的就是那条代码路径
+（P1-3 实测发现，见 CHANGELOG）。
+"""
 from .base import BaseAgent
 from .. import config, llm, memory
+from ..skill_loader import match_skills_for, skill_block
 from ..sport_data import SportStore, hr_zone
 
 _STORE = SportStore()
@@ -22,7 +50,15 @@ def _user_max_hr():
 class CoachAgent(BaseAgent):
     name = "coach"
     description = "专业教练：训练记录录入、心率区间/配速分析、力量渐进超负荷、周期化计划"
-    system_prompt = (
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 基础人格层（persona core）——**不参与自进化**
+    #
+    # 谭成义的人格骨架。只有人工改代码能改到这里：`存技能` / `patch 技能` 的落盘目标
+    # 是 skills/ 目录，没有代码路径能回写本常量，所以 LLM 的自进化不可能把人格改跑偏。
+    # 改动需人工审核 —— 在 diff 里看得见，可被 review 挡住。
+    # ══════════════════════════════════════════════════════════════════════
+    PERSONA_CORE = (
         "你是谭成义——在铁馆泡了十几年的老炮教练。不卖焦虑、不吹花活，把动作掰碎了教。\n"
         "【身份】从自己瞎练、膝盖疼、胸练平那批人里熬出来的，最懂『练了没感觉』的痛。专拆三分化、胸肌三分化、爬坡HIIT，把基本功讲透。\n"
         "【核心原则（必须贯彻）】\n"
@@ -42,8 +78,32 @@ class CoachAgent(BaseAgent):
         "【边界】首次回复声明一次：『我以谭成义视角跟你聊，基于公开教学材料推断，不是本人、也不做医疗建议。』涉及关节损伤/病理，建议咨询专业人士，不越界给医疗建议。"
     )
 
+    # 基类与直出路径（graph._GraphBackend / app）都按 system_prompt 取 prompt，
+    # 这里指向同一个人格层常量 —— 单一真源，不复制字符串。
+    system_prompt = PERSONA_CORE
+
+    # 补充知识层的归属名：skills/ 下 frontmatter 声明 `agent: coach` 的技能
+    #（coach 另按白名单吸收 clinician/expert 类，见 skill_loader.match_skills_for）。
+    KNOWLEDGE_AGENT = "coach"
+
+    @staticmethod
+    def _knowledge(msg: str, ctx: dict = None) -> list:
+        """取本轮要注入的**补充知识层**技能。
+
+        优先用调用方已经算好的 `ctx["skills"]`（app.py / graph.py 都已用
+        `match_skills_for` 预筛过，避免重复扫描）；调用方没给时（例如直接单测
+        `handle`）就地按触发词算一遍 —— 让「每次运行都注入知识层」不依赖调用方自觉。
+        """
+        hits = (ctx or {}).get("skills")
+        if hits is None:
+            hits = match_skills_for(msg, CoachAgent.KNOWLEDGE_AGENT)
+        return hits
+
     def handle(self, msg: str, ctx=None) -> str:
         action = self._classify(msg)
+        # 知识层取一次，结构化路径与对话路径共用（对话路径经基类 _llm 注入，
+        # 结构化路径由 _tip 注入——见下方注释）。
+        hits = self._knowledge(msg, ctx)
         # 结构化动作（mock / 真实模式一致：记录与分析是招牌功能，必须真落库、真计算）
         if action == "log_run":
             result = self._log_run(msg)
@@ -57,7 +117,9 @@ class CoachAgent(BaseAgent):
             # 通用对话：真实模式用 LLM，mock 给引导语
             if config.CONFIG.mock_mode:
                 return self._mock(msg)
-            result = self._llm(self._build_prompt(msg), ctx=ctx or {})
+            ctx = dict(ctx or {})
+            ctx["skills"] = hits          # 交给基类做 Tier 3 注入（含记忆召回）
+            result = self._llm(self._build_prompt(msg), ctx=ctx)
             if not result or not result.strip():
                 return ("我是你的教练 Agent，可以帮你：\n"
                         "· 记录训练：『记一次5km跑步，配速6分，平均心率150』\n"
@@ -66,18 +128,36 @@ class CoachAgent(BaseAgent):
             return result
         # 真实模式：在结构化结果之上让 LLM 补一句个性化建议（失败不影响主结果）
         if not config.CONFIG.mock_mode and result:
-            try:
-                tip = llm.chat(
-                    [{"role": "system", "content":
-                      "你是谭成义（铁馆老炮教练）。基于下面的训练事实，只用一句话给补充建议，"
-                      "带铁馆味、动作质量优先、不堆术语、不要重复已知数据、不要使用 Markdown 标题。"},
-                     {"role": "user", "content": result}],
-                    max_tokens=80, temperature=0.3,
-                )
-                if tip and not tip.startswith("[LLM"):
-                    result = result + "\n\n💡 " + tip
-            except Exception:
-                pass
+            return self._tip(result, hits)
+        return result
+
+    # 「补一句建议」的职责说明。**注意这里只是指向人格层的短指针，不是第二份人格定义**：
+    # 人格骨架单点定义在 PERSONA_CORE，避免两处描述各写一份、日久漂移。
+    # 结构化路径上的输出是确定性代码算的，唯一由 LLM 生成的就是这一句，
+    # 所以知识层（含被 patch 过的新知识）必须在这里也注入 —— 否则
+    # 「patch 技能 → 下次就能用到新知识」在记录/分析路径上不成立（P1-3 实测发现）。
+    _TIP_SYSTEM = (
+        "你是谭成义（铁馆老炮教练）的『补一句』环节。基于下面的训练事实，"
+        "只输出一句话的补充建议：带铁馆味、动作质量优先、不堆术语、"
+        "不重复已知数据、不使用 Markdown 标题、不要再声明身份或免责声明。"
+    )
+
+    def _tip(self, result: str, hits) -> str:
+        """在结构化结果后追加一句个性化建议。任何失败都原样返回 result（不影响主结果）。"""
+        try:
+            system = self._TIP_SYSTEM
+            block = skill_block(hits) if hits else ""
+            if block:
+                system = system + "\n\n" + block
+            tip = llm.chat(
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": result}],
+                max_tokens=80, temperature=0.3,
+            )
+        except Exception:
+            return result
+        if tip and not tip.startswith("[LLM"):
+            return result + "\n\n💡 " + tip
         return result
 
     # ---------- 录入 ----------

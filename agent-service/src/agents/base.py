@@ -1,23 +1,34 @@
 """所有专业 Agent 的基类。"""
 from .. import llm, memory, config
-from ..skill_loader import skill_block, tier1_catalogue
+from ..skill_loader import registry_version, skill_block, tier1_catalogue
 
-# 稳定前缀缓存：技能目录(tier1_catalogue)只依赖 skills 注册表，几乎不变。
-# 拼一次复用，既省每次调用的字符串拼装，又让全局前缀字符串保持稳定（更利于命中缓存）。
+# 技能目录（tier1_catalogue）缓存：目录只依赖 skills 注册表，很稳定，拼一次复用，
+# 既省每次调用的字符串拼装，又让全局前缀字符串保持稳定（更利于命中缓存）。
+# 但 `存技能` / `patch 技能` 会热改注册表 —— 所以缓存必须跟着注册表版本号走：
+# 只按「第一次调用」永久缓存，会让新蒸馏的技能永远不出现在目录里，LLM 也就
+# 不知道自己「有」这个技能可调用（P1-3 修）。
 _CATALOGUE_CACHE = None
+_CATALOGUE_VERSION = -1
 
 
 def _get_catalogue() -> str:
-    global _CATALOGUE_CACHE
-    if _CATALOGUE_CACHE is None:
+    global _CATALOGUE_CACHE, _CATALOGUE_VERSION
+    ver = registry_version()
+    if _CATALOGUE_CACHE is None or _CATALOGUE_VERSION != ver:
         _CATALOGUE_CACHE = tier1_catalogue() or ""
+        _CATALOGUE_VERSION = ver
     return _CATALOGUE_CACHE
 
 
 def _invalidate_catalogue():
-    """skills 注册表热变更时调用（当前无热变更，预留接口）。"""
-    global _CATALOGUE_CACHE
+    """手动丢弃目录缓存，强制下次重建。
+
+    正常的热更新由注册表版本号自动触发（见 _get_catalogue），这个函数只是
+    留一个手动兜底入口，不需要在 skill_loader 的写路径里回调它（避免反向依赖）。
+    """
+    global _CATALOGUE_CACHE, _CATALOGUE_VERSION
     _CATALOGUE_CACHE = None
+    _CATALOGUE_VERSION = -1
 
 
 class BaseAgent:
