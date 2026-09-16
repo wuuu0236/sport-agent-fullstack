@@ -12,9 +12,39 @@
 
     <div class="p-body">
       <ul v-if="entries.length" class="facts">
-        <li v-for="(e, i) in entries" :key="i" class="fact">
+        <li
+          v-for="(e, i) in entries"
+          :key="i"
+          class="fact"
+          :class="{ confirming: confirmIdx === i }"
+        >
           <span class="mk" :class="'c' + (i % 4)" />
-          <span class="tx">{{ e }}</span>
+          <div class="f-main">
+            <span class="tx">{{ e }}</span>
+            <!-- 删除用二步确认内联展开（与「计划」模块一致），不用原生 confirm 弹窗 -->
+            <div v-if="confirmIdx === i" class="ops">
+              <span class="ops-tip">删除后不可恢复</span>
+              <div class="ops-row">
+                <AppButton variant="danger" size="sm" :busy="busy" @click="doDelete(i, e)">
+                  确认删除
+                </AppButton>
+                <AppButton variant="ghost" size="sm" :disabled="busy" @click="cancelDelete">
+                  取消
+                </AppButton>
+              </div>
+            </div>
+            <p v-if="err && errIdx === i" class="err">{{ err }}</p>
+          </div>
+          <button
+            v-if="confirmIdx !== i"
+            class="del"
+            type="button"
+            title="删除这条画像"
+            aria-label="删除这条画像"
+            @click="askDelete(i)"
+          >
+            <span v-html="TRASH_ICON" />
+          </button>
         </li>
       </ul>
       <div v-else class="none">
@@ -31,7 +61,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import AppButton from '../ui/AppButton.vue'
+import { forgetMemory } from '../../api/client'
 
 const props = defineProps<{ entries: string[] }>()
 const emit = defineEmits<{ reload: [] }>()
@@ -40,12 +72,63 @@ const STROKE =
   'fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"'
 const REFRESH_ICON = `<svg viewBox="0 0 24 24" ${STROKE}><path d="M19.5 12a7.5 7.5 0 1 1-2.3-5.4"/><path d="M19.9 4.6v4.2h-4.2"/></svg>`
 const LOCK_ICON = `<svg viewBox="0 0 24 24" ${STROKE}><rect x="5" y="10.4" width="14" height="9.6" rx="2.2"/><path d="M8.4 10.4V7.8a3.6 3.6 0 0 1 7.2 0v2.6"/></svg>`
+const TRASH_ICON = `<svg viewBox="0 0 24 24" ${STROKE}><path d="M4.8 7.4h14.4"/><path d="M9.6 7.4V5.6h4.8v1.8"/><path d="M6.6 7.4 7.6 19a1.4 1.4 0 0 0 1.4 1.3h6a1.4 1.4 0 0 0 1.4-1.3l1-11.6"/><path d="M10.2 11.2v5.2M13.8 11.2v5.2"/></svg>`
 
 const spinning = ref(false)
 function reload() {
   spinning.value = true
   emit('reload')
   setTimeout(() => (spinning.value = false), 700)
+}
+
+// ---- 逐条删除（2026-09-17：用户可以自主删掉不用的画像）----
+const confirmIdx = ref<number | null>(null)
+const errIdx = ref<number | null>(null)
+const busy = ref(false)
+const err = ref('')
+
+// 列表刷新后索引会整体前移，确认态必须清掉——否则「取消 / 确认」会落到另一条上
+watch(
+  () => props.entries,
+  () => {
+    confirmIdx.value = null
+    errIdx.value = null
+    err.value = ''
+  },
+)
+
+function askDelete(i: number) {
+  err.value = ''
+  errIdx.value = null
+  confirmIdx.value = i
+}
+
+function cancelDelete() {
+  confirmIdx.value = null
+}
+
+async function doDelete(i: number, text: string) {
+  busy.value = true
+  err.value = ''
+  try {
+    // 面板自己发请求：emit 没法把失败原因（后端是 `{ok:false,msg}` 这种返回值式错误，
+    // 不抛异常）回传给父组件，而失败必须在点下去的那一条上就地显示。
+    // text 传条目原文整条——后端按子串匹配、只删第一条命中的条目。
+    const res = await forgetMemory('user', text)
+    confirmIdx.value = null
+    if (res.ok) {
+      emit('reload')
+    } else {
+      errIdx.value = i
+      err.value = res.msg || '删除失败'
+    }
+  } catch (e) {
+    confirmIdx.value = null
+    errIdx.value = i
+    err.value = '删除失败：' + String(e)
+  } finally {
+    busy.value = false
+  }
 }
 </script>
 
@@ -133,6 +216,59 @@ function reload() {
 .fact:hover {
   transform: translateX(1px);
   border-color: var(--line-3);
+}
+/* 待确认删除的那一条：整体染红，避免点错 */
+.fact.confirming {
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+}
+.f-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.ops {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+.ops-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.ops-tip {
+  font-size: var(--fs-2xs);
+  color: var(--danger);
+}
+.err {
+  font-size: var(--fs-2xs);
+  color: var(--danger);
+  line-height: var(--lh-normal);
+  word-break: break-all;
+}
+
+.del {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  color: var(--ink-4);
+  transition: color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out);
+}
+.del:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.del :deep(svg) {
+  width: 14px;
+  height: 14px;
 }
 /* 每条前的小圆点轮换 4 种语义色，让列表有节奏 */
 .mk {

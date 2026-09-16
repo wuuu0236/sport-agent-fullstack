@@ -69,6 +69,21 @@ export async function getMemory(): Promise<{ user: string[]; memory: string[]; s
   return await resp.json()
 }
 
+// 删除一条长期记忆（对话页「用户画像」面板的删除入口）。
+// text 必须是**条目原文整条**：后端按子串匹配、只删第一条命中的条目（见 app.py /memory/forget）。
+export async function forgetMemory(
+  target: 'user' | 'memory',
+  text: string,
+): Promise<{ ok: boolean; msg?: string }> {
+  const resp = await fetch(`/agent/memory/forget`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target, text }),
+  })
+  if (!resp.ok) throw new Error('memory forget failed')
+  return await resp.json()
+}
+
 // 训练计划：当前计划 + 备选方案 + 待确认计划
 export interface PlanData {
   id: string
