@@ -60,6 +60,7 @@
   ③ 配 `REVIEW_MODEL` 可让评审走**另一套模型**（消除同模型自评的盲区共享与自我偏好），
   未配置则回退同模型并在事件里如实标注 `reviewer_model`。非 planner 步骤的评审意见不再丢弃，会传给综合节点供修正或标注；  
   **`coach`(谭成义人格教练) 是独立入口而非别名**——健身域问题统一由它单 Agent 直答。
+  **人格显式分两层**：① *基础人格层* `CoachAgent.PERSONA_CORE`（身份 / 核心原则 / 动作铁律 / 表达风格 / 边界声明），**只接受人工改代码**——`存技能` / `patch 技能` 只落盘 `skills/`，没有任何代码路径能回写它，所以模型自进化改不跑偏人格；② *补充知识层* = `skills/` 下归属 coach 的 SKILL.md，运行时按触发词注入（对话路径经基类 Tier 3，结构化路径的「补一句建议」经 `_tip`）。**边界要说清**：跑步/力量解析、心率区间数值、TRIMP 全是 `sport_data.py` 的确定性计算、不消费技能——知识层改的是**判读口径**，不是 `ZONES` 里的数值边界。
 - 保留旧别名：`research`→searcher、`posture`→clinician、`memorist`→memory。
 - 编排触发：`src/intent.py` 的 LLM 分类判定「单 Agent 直答 / 数据操作 / 多 Agent 编排」——需要「查资料 + 算数据 + 出成品」两件以上、跨期对比、或要周报/阶段总结/排期计划成品时才编排；记录类与健身域问答不进图（分类失败或 mock 模式退回原关键词规则，宁可少拆一次也不误升级）。
 
@@ -90,8 +91,8 @@ sport-agent-fullstack/
 │   ├── requirements.txt / requirements-dev.txt / requirements-ocr.txt
 │   ├── .env            # 含 LLM_API_KEY（已被根目录 .gitignore 排除，切勿提交）
 │   ├── data/           # 记忆与训练记录（自动生成）
-│   ├── tests/          # pytest 147 条：解析 / 意图(LLM分类+规则兜底) / 编排图 / 评审规则 / 分析 / 计划(质量门+产出类型) / 技能 / 存储 / HTTP 鉴权
-│   ├── skills/         # 4 个可插拔教练技能（SKILL.md，按触发词动态挂载）
+│   ├── tests/          # pytest 182 条：解析 / 意图(LLM分类+规则兜底) / 编排图 / 评审规则 / 分析 / 计划(质量门+产出类型) / 技能 / 人格分层 / 存储 / 检索 / HTTP 鉴权
+│   ├── skills/         # 4 个可插拔教练技能（SKILL.md，按触发词动态挂载）——即 coach 的「补充知识层」
 │   ├── .venv/          # 项目专属虚拟环境（LangGraph 依赖，不入库）
 │   ├── _dump_prompt.py # 诊断工具：打印任意输入真正发给 LLM 的完整提示词（4 层拼装结果，排障/自查用）
 │   └── src/
@@ -102,13 +103,13 @@ sport-agent-fullstack/
 │       ├── supervisor.py        # 单 Agent 关键词路由（健身域统一归 coach 直答）
 │       ├── sport_data.py        # SportStore：暂存队列 _STAGED + 周聚合/环比/日负荷/ACWR 确定性计算
 │       ├── plan_store.py        # 计划库：pending 两段确认 / 切换 / 删除
-│       ├── skill_loader.py      # Skill 三级渐进加载 + 蒸馏 / patch
+│       ├── skill_loader.py      # Skill 三级渐进加载 + 蒸馏 / patch（注册表版本号驱动目录缓存热更新）
 │       ├── memory.py            # 双存储记忆：SQLite 唯一真源 + WAL + jieba/FTS5 混合召回（向量侧可选）
 │       └── agents/              # 10 个可派发子 Agent + reviewer + coach + 注册表 agent_catalog
 │           ├── recorder_agent.py / analyst_agent.py / research_agent.py（类名 SearcherAgent）
 │           ├── posture_agent.py（类名 ClinicianAgent）/ expert_agent.py / planner_agent.py
 │           ├── memory_agent.py / scheduler_agent.py / writer_agent.py / general_agent.py
-│           ├── coach_agent.py      # 谭成义人格教练：健身域唯一直答入口（内部再分流记录/分析/问答）
+│           ├── coach_agent.py      # 谭成义人格教练：健身域唯一直答入口；PERSONA_CORE 人格层（不可自进化）+ skills/ 知识层
 │           ├── reviewer_agent.py   # 评审：PASS / ISSUES 协议（主循环内部节点，不参与 LLM 拆解）
 │           └── base.py         # BaseAgent._llm：空串注入哨兵兜底文案（供门控识别）
 ├── frontend/           # Vue 3 + Vite（设计令牌 + 组件分层）
@@ -209,7 +210,7 @@ start-all.bat
 - **CORS**：旧版 `src/server.py`（休眠的 stdlib HTTP 入口）从 `*` 收紧为仅回显本机 Origin，并走同一 token 校验。
 - **异常脱敏**：Agent 内部异常只记服务端日志，客户端拿通用文案；旧版 `.env` 上传限制等回归见 `CHANGELOG.md`。
 
-## 测试（168 个用例，`pytest tests/` 全绿）
+## 测试（182 个用例，`pytest tests/` 全绿）
 
 ```bash
 cd agent-service
@@ -217,7 +218,7 @@ cd agent-service
 .venv/Scripts/python -m pytest tests/ -q
 ```
 
-`tests/` 下 12 个文件，覆盖十层：
+`tests/` 下 13 个文件，覆盖十一层：
 
 | 层 | 文件 | 覆盖内容 |
 | --- | --- | --- |
@@ -228,6 +229,7 @@ cd agent-service
 | 分析 | `test_analyze.py` | 心率区间 / 负荷 / 力量趋势 |
 | 计划 | `test_plan_store.py` · `test_plan_guard.py` · `test_planner_prompt.py` | 流转与并发、写入点质量门（拦降级文本）、planner 产出类型（周报 vs 计划） |
 | 技能 | `test_skills.py` | 三级渐进加载 / 触发词去重 / 主理 Agent 门控 |
+| 人格分层 | `test_coach_persona.py` | **人格层不被自进化写入**（patch 技能后 `PERSONA_CORE` 字节不变）、知识层在对话路径与结构化路径（补建议）都被注入、`存技能` 后目录缓存热更新 |
 | 存储 | `test_memory.py` | 双存储读改写 + **WAL 并发（多线程 append 零丢失）** + 旧 Markdown/session.json 一次性迁移（幂等）+ 整套替换重建索引 |
 | 检索 | `test_memory_search.py` | **中文自然语言召回**（钉住旧实现「整句一个 token → 0 命中」的回归）、词/bigram 双索引、bm25 分列权重、向量侧降级与近重复合并 |
 | HTTP | `test_http_auth.py` | 鉴权中间件 + 异常脱敏 |
