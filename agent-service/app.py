@@ -324,6 +324,26 @@ def memory_list():
     }
 
 
+@app.post("/memory/forget")
+def memory_forget(req: dict = None):
+    """删除一条长期记忆（对话页「用户画像」面板的删除入口）。
+
+    与对话里「忘掉…」共用 `memory.forget()`：**按子串匹配、删第一条命中的条目**，
+    所以前端要把条目原文整条传过来——传关键词有可能误删另一条更早的条目。
+
+    ⚠️ `memory.forget()` 是**返回值式**错误（返回 `(ok, msg)`、不抛异常），
+    所以这里必须显式判 `ok`：老代码在 `/commit` 上就栽过这个坑（见 CHANGELOG）。
+    """
+    from src import memory as mem
+    target = (req or {}).get("target", "user")
+    text = ((req or {}).get("text") or "").strip()
+    if target not in ("user", "memory"):
+        raise HTTPException(status_code=400, detail="target 必须是 user 或 memory")
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    ok, msg = mem.forget(target, text)
+    return {"ok": ok, "msg": msg}
+
 
 @app.get("/plan")
 def get_plan():
