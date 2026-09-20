@@ -22,9 +22,9 @@
           </div>
 
           <ul v-if="data.user.length" class="entries">
-            <li v-for="(e, i) in data.user" :key="i" class="entry">
+            <li v-for="(e, i) in data.user" :key="e.id" class="entry">
               <span class="idx num">{{ String(i + 1).padStart(2, '0') }}</span>
-              <span class="tx">{{ e }}</span>
+              <span class="tx">{{ e.text }}</span>
             </li>
           </ul>
           <p v-else class="empty">
@@ -46,9 +46,9 @@
           </div>
 
           <ul v-if="data.memory.length" class="entries">
-            <li v-for="(e, i) in data.memory" :key="i" class="entry">
+            <li v-for="(e, i) in data.memory" :key="e.id" class="entry">
               <span class="idx num">{{ String(i + 1).padStart(2, '0') }}</span>
-              <span class="tx">{{ e }}</span>
+              <span class="tx">{{ e.text }}</span>
             </li>
           </ul>
           <p v-else class="empty">还没有助理笔记。</p>
@@ -86,7 +86,7 @@ import AppCard from '../components/ui/AppCard.vue'
 import AppPill from '../components/ui/AppPill.vue'
 import AppButton from '../components/ui/AppButton.vue'
 import SectionTitle from '../components/ui/SectionTitle.vue'
-import { getMemory } from '../api/client'
+import { getMemory, type MemoryEntry } from '../api/client'
 
 const STROKE =
   'fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"'
@@ -95,7 +95,7 @@ const USER_ICON = `<svg viewBox="0 0 24 24" ${STROKE}><circle cx="12" cy="8.4" r
 const NOTE_ICON = `<svg viewBox="0 0 24 24" ${STROKE}><path d="M6 3.8h8.6L19 8.2v12H6z"/><path d="M14.2 3.8v4.6H19"/><path d="M9 12.4h6.4M9 15.6h4.4"/></svg>`
 const SNAP_ICON = `<svg viewBox="0 0 24 24" ${STROKE}><path d="M12 3.6 20 8.4v7.2L12 20.4 4 15.6V8.4z"/><path d="M12 12v8.4M12 12l8-3.6M12 12 4 8.4"/></svg>`
 
-const data = ref<{ user: string[]; memory: string[]; snapshot: string }>({
+const data = ref<{ user: MemoryEntry[]; memory: MemoryEntry[]; snapshot: string }>({
   user: [],
   memory: [],
   snapshot: '',

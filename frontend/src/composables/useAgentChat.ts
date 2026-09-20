@@ -9,6 +9,7 @@ import {
   orchestrate,
   commitRecords,
   getMemory,
+  type MemoryEntry,
   type OrchestrateEvent,
 } from '../api/client'
 import { agentMeta } from '../constants/agents'
@@ -31,7 +32,7 @@ export function useAgentChat(opts: {
   const conn = ref<'checking' | 'ok' | 'err'>('checking')
   const connText = ref('连接检测中')
   const pendingCommit = ref<PendingCommit | null>(null)
-  const profile = ref<string[]>([])
+  const profile = ref<MemoryEntry[]>([])
 
   // ---------- 连接状态 ----------
   async function refreshConn() {

@@ -20,12 +20,12 @@
         >
           <span class="mk" :class="'c' + (i % 4)" />
           <div class="f-main">
-            <span class="tx">{{ e }}</span>
+            <span class="tx">{{ e.text }}</span>
             <!-- 删除用二步确认内联展开（与「计划」模块一致），不用原生 confirm 弹窗 -->
             <div v-if="confirmIdx === i" class="ops">
               <span class="ops-tip">删除后不可恢复</span>
               <div class="ops-row">
-                <AppButton variant="danger" size="sm" :busy="busy" @click="doDelete(i, e)">
+                <AppButton variant="danger" size="sm" :busy="busy" @click="doDelete(i, e.id)">
                   确认删除
                 </AppButton>
                 <AppButton variant="ghost" size="sm" :disabled="busy" @click="cancelDelete">
@@ -63,9 +63,9 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import AppButton from '../ui/AppButton.vue'
-import { forgetMemory } from '../../api/client'
+import { forgetMemoryById, type MemoryEntry } from '../../api/client'
 
-const props = defineProps<{ entries: string[] }>()
+const props = defineProps<{ entries: MemoryEntry[] }>()
 const emit = defineEmits<{ reload: [] }>()
 
 const STROKE =
@@ -107,14 +107,14 @@ function cancelDelete() {
   confirmIdx.value = null
 }
 
-async function doDelete(i: number, text: string) {
+async function doDelete(i: number, id: number) {
   busy.value = true
   err.value = ''
   try {
     // 面板自己发请求：emit 没法把失败原因（后端是 `{ok:false,msg}` 这种返回值式错误，
     // 不抛异常）回传给父组件，而失败必须在点下去的那一条上就地显示。
-    // text 传条目原文整条——后端按子串匹配、只删第一条命中的条目。
-    const res = await forgetMemory('user', text)
+    // 传 /memory 返回的稳定 id——后端按主键精确删；两条内容有包含关系的条目也不会删错。
+    const res = await forgetMemoryById(id)
     confirmIdx.value = null
     if (res.ok) {
       emit('reload')

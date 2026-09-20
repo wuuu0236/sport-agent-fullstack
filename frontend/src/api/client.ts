@@ -62,23 +62,30 @@ export async function getSessions(limit = 12): Promise<{ sessions: any[] }> {
   return await resp.json()
 }
 
-// 长期记忆：USER（关于用户）/ MEMORY（助理笔记），工作台「记忆」模块用
-export async function getMemory(): Promise<{ user: string[]; memory: string[]; snapshot: string }> {
+// 长期记忆：USER（关于用户）/ MEMORY（助理笔记），工作台「记忆」模块 + 对话页画像面板用。
+// 每条带稳定主键 id（SQLite entries.id）：删除按 id 精确删，不受同文/包含关系条目干扰。
+export interface MemoryEntry {
+  id: number
+  text: string
+}
+
+export async function getMemory(): Promise<{
+  user: MemoryEntry[]
+  memory: MemoryEntry[]
+  snapshot: string
+}> {
   const resp = await fetch(`/agent/memory`)
   if (!resp.ok) throw new Error('memory fetch failed')
   return await resp.json()
 }
 
 // 删除一条长期记忆（对话页「用户画像」面板的删除入口）。
-// text 必须是**条目原文整条**：后端按子串匹配、只删第一条命中的条目（见 app.py /memory/forget）。
-export async function forgetMemory(
-  target: 'user' | 'memory',
-  text: string,
-): Promise<{ ok: boolean; msg?: string }> {
+// 传 /memory 返回的稳定 id，后端按主键精确删——比旧的「子串匹配删第一条」不会误删。
+export async function forgetMemoryById(id: number): Promise<{ ok: boolean; msg?: string }> {
   const resp = await fetch(`/agent/memory/forget`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ target, text }),
+    body: JSON.stringify({ id }),
   })
   if (!resp.ok) throw new Error('memory forget failed')
   return await resp.json()
