@@ -80,7 +80,7 @@
 | 前端        | Vue 3 + Vite（设计令牌体系 · **深/浅双主题** + 4 模块工作台 + 自研 SVG 图表 + SSE EventSource；多 Agent 协作走内联时间轴） |
 | 网关        | Spring Boot 3（薄转发：/api/chat、/api/import-image、/api/orchestrate、/api/commit） |
 | Agent 能力层 | Python + FastAPI 微服务 + **LangGraph StateGraph** 编排（plan → validate → dispatch → review → rewrite → synthesize）：10 个可派发子 Agent，另有 `reviewer` 评审节点与 `coach` 直答入口 |
-| 记忆        | **SQLite 唯一真源（WAL 并发）** + 双存储（关于用户 / 助理笔记）+ **jieba + FTS5 混合召回** + 冻结快照注入；Markdown 仅作只读视图；画像面板支持**逐条删除**（`POST /memory/forget`，与对话里「忘掉…」同一套逻辑）+ Skill 三级渐进加载                 |
+| 记忆        | **SQLite 唯一真源（WAL 并发）** + 双存储（关于用户 / 助理笔记）+ **jieba + FTS5 混合召回** + 冻结快照注入；Markdown 仅作只读视图；画像面板支持**按稳定 id 逐条删除**（`POST /memory/forget` body {"id":N}，精确删，内容有包含关系的条目不会误删）+ Skill 三级渐进加载                 |
 | 数据引擎      | SportStore 确定性计算：周聚合 / 周环比（缺口如实标注）/ 日负荷 / ACWR 急慢性负荷比（伤病风险）                 |
 | LLM       | DeepSeek `deepseek-v4-flash`（OpenAI 兼容接口，无 key 自动 mock 降级）                  |
 
@@ -100,7 +100,7 @@ sport-agent-fullstack/
 │   ├── requirements.txt / requirements-dev.txt / requirements-ocr.txt
 │   ├── .env            # 含 LLM_API_KEY（已被根目录 .gitignore 排除，切勿提交）
 │   ├── data/           # 记忆与训练记录（自动生成）；暂存队列在 staged.db（SQLite，抗重启）
-│   ├── tests/          # pytest 265 条：解析 / 意图(LLM分类+规则兜底) / 编排图 / 评审规则 / 分析 / 计划(质量门+产出类型) / 技能 / 人格分层 / 存储 / 记忆删除接口 / 检索 / 暂存 / 落库防线 / 截图导入 / LLM 调用层 / 编排上下文 / HTTP 鉴权
+│   ├── tests/          # pytest 274 条：解析 / 意图(LLM分类+规则兜底) / 编排图 / 评审规则 / 分析 / 计划(质量门+产出类型) / 技能 / 人格分层 / 存储 / 记忆删除接口 / 检索 / 暂存 / 落库防线 / 截图导入 / LLM 调用层 / 编排上下文 / HTTP 鉴权
 │   ├── skills/         # 4 个可插拔教练技能（SKILL.md，按触发词动态挂载）——即 coach 的「补充知识层」
 │   ├── .venv/          # 项目专属虚拟环境（LangGraph 依赖，不入库）
 │   ├── _dump_prompt.py # 诊断工具：打印任意输入真正发给 LLM 的完整提示词（4 层拼装结果，排障/自查用）
@@ -219,7 +219,7 @@ start-all.bat
 - **CORS**：旧版 `src/server.py`（休眠的 stdlib HTTP 入口）从 `*` 收紧为仅回显本机 Origin，并走同一 token 校验。
 - **异常脱敏**：Agent 内部异常只记服务端日志，客户端拿通用文案；旧版 `.env` 上传限制等回归见 `CHANGELOG.md`。
 
-## 测试（265 个用例，`pytest tests/` 全绿）
+## 测试（274 个用例，`pytest tests/` 全绿）
 
 ```bash
 cd agent-service
@@ -242,10 +242,10 @@ cd agent-service
 | 存储 | `test_memory.py` | 双存储读改写 + **WAL 并发（多线程 append 零丢失）** + 旧 Markdown/session.json 一次性迁移（幂等）+ 整套替换重建索引 + **`reset_long_term` 的「重置演示数据」语义**（长期记忆与会话历史一并清，与注释一致） |
 | 暂存 | `test_staged_store.py` | **跨进程/跨重启耐用**（新连接仍读到暂存记录）、FIFO 顺序、按 `_staged_id` 精确清除、8 线程并发暂存零丢失、**并发确认不重复入库**（原子抢占 `staged → committing`，起跑线对齐的多线程确认每条只落一次）、抢占租期回收（抢占方崩溃不卡死）、旧库自动补列 |
 | 截图导入 | `test_import_stage.py` | **截图导入闭环**：`staged_records` 必须带 `_staged_id`（前端要靠它精确确认，只给布尔量前端只能整队清空）、`_stage_import_data` 返回记录本体而非 bool、解析成功但无法入库时给出可读原因 |
-| 落库防线 | `test_commit_guard.py` | **落库失败不许丢数据**：`/commit` 检查 `_import_save` 的返回值（它失败只标记、不抛异常），`_save` 失败抛 `IOError`，`commit_staged` 改成**先落库成功才出队**、失败记录留在暂存可重试 |
+| 落库防线 | `test_commit_guard.py` | **落库失败不许丢数据 + 并发不重复入库**：`/commit` 检查 `_import_save` 的返回值（它失败只标记、不抛异常），`_save` 失败抛 `IOError`，`commit_staged` **先落库成功才出队**、失败记录留在暂存可重试；带 records 的路径与空提交共用同一套**按 id 原子抢占**（staged→committing，rowcount==1 才落库），Barrier 双线程并发确认同一条只落库一次、抢不到的一方如实报 skipped，落库失败把抢占退回 staged |
 | LLM 调用层 | `test_llm_timeout.py` | **timeout 透传**（拆解 15s / 综合 30s，打桩捕获实参 kwargs）、失败时异常类型与原因进服务端日志、面向用户的降级文案不变 |
 | 编排上下文 | `test_session_context.py` | **编排中间产出写进 session**（拼成一条 `[编排过程]` 摘要，不挤占 50 条滚动窗口）、摘要能被 `session_turns` 读回注入 |
-| 记忆接口 | `test_memory_api.py` | **画像逐条删除**（`POST /memory/forget`）：删掉要连 FTS 索引一起清（否则被删条目还会被召回注入上下文）、按 target 隔离（删 user 不动 memory）、删不存在的如实回 `ok:false`（**返回值式错误必须显式判**，否则界面会「显示删成功、条目还在」）、连点两次幂等；并用字符级子串语义钉住「前端要传条目原文整条」这条调用契约 |
+| 记忆接口 | `test_memory_api.py` | **画像逐条删除**（`POST /memory/forget`）：删掉要连 FTS 索引一起清（否则被删条目还会被召回注入上下文）、按 target 隔离（删 user 不动 memory）、删不存在的如实回 `ok:false`（**返回值式错误必须显式判**，否则界面会「显示删成功、条目还在」）、连点两次幂等；并用字符级子串语义钉住旧契约；**按稳定 id 精确删**（`/memory` 每条带主键，两条内容有包含关系的条目按 id 删长条、短条不受伤——旧子串匹配会删错） |
 | 检索 | `test_memory_search.py` | **中文自然语言召回**（钉住旧实现「整句一个 token → 0 命中」的回归）、词/bigram 双索引、bm25 分列权重、向量侧降级与近重复合并 |
 | HTTP | `test_http_auth.py` | 鉴权中间件 + 异常脱敏 |
 
@@ -341,12 +341,16 @@ LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-
 **展示与画像管理（前端经 Vite `/agent` 代理直连 8001，不过 Spring Boot）**
 ```
 GET /sessions?limit=N   → 最近训练（含心率区间/配速/负荷等结构化字段，供图表渲染）
-GET /memory             → 长期记忆（USER 关于用户 / MEMORY 助理笔记）
+GET /memory             → 长期记忆（USER 关于用户 / MEMORY 助理笔记；每条带稳定 id）
 POST /memory/forget     → 删除一条长期记忆（对话页「用户画像」面板的逐条删除；
-                          body {target:"user"|"memory", text}，text 传**条目原文整条**）
+                          body {"id": N} 按主键精确删；旧契约 {target,text} 子串匹配仍兼容）
 GET /plan               → 计划库（activeId / pending 待确认 / plans 列表）
 POST /plan/apply | /plan/switch | /plan/delete | /plan/generate | /plan/discard
 ```
+
+> ⚠️ **部署提示**：`/agent` 前缀的直连代理只存在于 Vite dev server。若日后把
+> `dist/` 构建产物放到 Java 网关 / Nginx 后面，必须在网关补一条 `/agent` → 8001
+> 的转发，否则画像删除、训练数据、计划等页面功能会静默失效。
 
 agent-service 还提供：
 - `POST /supervise`（JSON：返回 `{agent:"supervisor", output, events[]}`；`?stream=1` 走 SSE）
