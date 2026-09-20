@@ -193,6 +193,37 @@ def _claim_first_staged():
             # 被别的连接抢先了：继续看下一条，别退化成「整批放弃」
 
 
+def _claim_by_ids(staged_ids: list) -> list:
+    """**按 id 原子抢占**一批待确认记录（/commit 带 records 的精确路径用）。
+
+    与 `_claim_first_staged` 同一套语义：staged → committing，**只有 UPDATE
+    rowcount==1 的才算抢到**（别的连接正在提交同一条 → rowcount=0 → 本请求跳过它）。
+    老的 records 路径完全不碰 status 字段、直接落库——两个端同时确认同一批待确认
+    卡片时会把同一批记录写进训练库两遍，这是 2026-09-20 修掉的重复入库洞。
+
+    抢占前先收回过期租期（崩溃兜底，与队首抢占共用 _CLAIM_LEASE）。
+    返回**实际抢到**的 staged_id 列表（保持传入顺序、去重）。
+    """
+    now = datetime.datetime.now()
+    now_s = now.isoformat(timespec="seconds")
+    lease_cut = (now - datetime.timedelta(seconds=_CLAIM_LEASE)).isoformat(timespec="seconds")
+    claimed = []
+    with _staged_db() as conn:
+        conn.execute(
+            "UPDATE staged SET status='staged', claimed_at=NULL "
+            "WHERE status='committing' AND (claimed_at IS NULL OR claimed_at < ?)",
+            (lease_cut,))
+        for sid in dict.fromkeys(staged_ids):  # 去重且保序
+            if not sid:
+                continue
+            n = conn.execute(
+                "UPDATE staged SET status='committing', claimed_at=? "
+                "WHERE staged_id=? AND status='staged'", (now_s, sid)).rowcount
+            if n == 1:
+                claimed.append(sid)
+    return claimed
+
+
 def _release_claim(staged_id: str) -> None:
     """把抢占退回去（落库失败时调用），让这条记录还能被重试确认。"""
     if not staged_id:
@@ -306,6 +337,18 @@ class SportStore:
         """清除暂存。ids=None 清空全部；传 _staged_id 列表时只清匹配项
         （前端确认的那批记录），不影响其他会话/请求的暂存。返回清除条数。"""
         return _discard_staged(ids)
+
+    def claim_staged(self, staged_ids: list) -> list:
+        """按 id 原子抢占一批待确认记录，返回**实际抢到**的 staged_id 列表。
+
+        /commit 带 records 的路径必须先走这里：抢到的才有资格落库，
+        抢不到的是别的请求正在提交同一条，跳过即防重复入库。
+        """
+        return _claim_by_ids(staged_ids)
+
+    def release_staged(self, staged_id: str) -> None:
+        """把按 id 的抢占退回去（落库失败时调用），让这条记录还能被重试确认。"""
+        _release_claim(staged_id)
 
     def _save(self, rec):
         # 微秒级时间戳：同一秒内多条记录（批量导入/连续提交）不会互相覆盖丢数据

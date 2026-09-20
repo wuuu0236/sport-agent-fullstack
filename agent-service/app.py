@@ -314,12 +314,16 @@ def list_sessions(limit: int = 12):
 
 @app.get("/memory")
 def memory_list():
-    """长期记忆查看（工作台「记忆」模块）：USER（关于用户）/ MEMORY（助理笔记）。"""
+    """长期记忆查看（工作台「记忆」模块）：USER（关于用户）/ MEMORY（助理笔记）。
+
+    每条带稳定主键：[{"id": int, "text": str}, …]——画像面板的删除按 id 精确删
+    （`forget_by_id`），避免两条内容有包含关系的条目被「子串匹配删第一条」误删。
+    """
     from src import memory as mem
     mem.load()  # 每次读盘，新写入的 USER.md / MEMORY.md 立即生效（无需重启服务）
     return {
-        "user": mem.list_store("user") or [],
-        "memory": mem.list_store("memory") or [],
+        "user": mem.list_with_ids("user"),
+        "memory": mem.list_with_ids("memory"),
         "snapshot": mem.snapshot_block(),
     }
 
@@ -328,20 +332,26 @@ def memory_list():
 def memory_forget(req: dict = None):
     """删除一条长期记忆（对话页「用户画像」面板的删除入口）。
 
-    与对话里「忘掉…」共用 `memory.forget()`：**按子串匹配、删第一条命中的条目**，
-    所以前端要把条目原文整条传过来——传关键词有可能误删另一条更早的条目。
+    两种调用方式：
+    · **{"id": N}（推荐）**——按 `/memory` 返回的稳定主键精确删（`forget_by_id`）；
+    · {"target", "text"}（旧契约）——按子串匹配、删第一条命中，对话侧「忘掉…」
+      同语义。两条条目有包含关系时子串可能删错，前端一律走 id。
 
-    ⚠️ `memory.forget()` 是**返回值式**错误（返回 `(ok, msg)`、不抛异常），
+    ⚠️ 两者都是**返回值式**错误（返回 `(ok, msg)`、不抛异常），
     所以这里必须显式判 `ok`：老代码在 `/commit` 上就栽过这个坑（见 CHANGELOG）。
     """
     from src import memory as mem
-    target = (req or {}).get("target", "user")
-    text = ((req or {}).get("text") or "").strip()
-    if target not in ("user", "memory"):
-        raise HTTPException(status_code=400, detail="target 必须是 user 或 memory")
-    if not text:
-        raise HTTPException(status_code=400, detail="text is required")
-    ok, msg = mem.forget(target, text)
+    body = req or {}
+    if body.get("id") is not None:
+        ok, msg = mem.forget_by_id(body["id"])
+    else:
+        target = body.get("target", "user")
+        text = (body.get("text") or "").strip()
+        if target not in ("user", "memory"):
+            raise HTTPException(status_code=400, detail="target 必须是 user 或 memory")
+        if not text:
+            raise HTTPException(status_code=400, detail="id 或 text 必须提供一个")
+        ok, msg = mem.forget(target, text)
     return {"ok": ok, "msg": msg}
 
 
@@ -466,18 +476,37 @@ def commit(req: dict = None):
     """
     store = SportStore()
     if req and req.get("records"):
-        r = _import_save({"records": req["records"]})
-        # _import_save 落库失败只返回 {"ok": False} 而不抛异常，必须显式检查。
+        recs = req["records"]
+        # ---- 原子抢占（与空提交的 commit_staged 同一套语义，2026-09-20 补齐）----
+        # 带 _staged_id 的记录先按 id 抢占（staged → committing，rowcount==1 才算抢到）：
+        # 两个端同时确认同一批待确认卡片时，第二个请求抢不到 → 跳过而不落库，
+        # 消除「同一条记录写进训练库两遍」的重复入库。老实现完全不碰 status、直接落库。
+        with_ids = [r for r in recs if r.get("_staged_id")]
+        without_ids = [r for r in recs if not r.get("_staged_id")]
+        claimed = store.claim_staged([r["_staged_id"] for r in with_ids])
+        claimed_set = set(claimed)
+        skipped = [r["_staged_id"] for r in with_ids if r.get("_staged_id") not in claimed_set]
+        # 只落库「抢到的 + 天生无暂存 id 的旧调用记录」（后者不在暂存表，无从抢占，
+        # 保持旧语义直接落库）；抢不到的是别的请求正在提交同一条。
+        to_save = [r for r in with_ids if r.get("_staged_id") in claimed_set] + without_ids
+        if not to_save:
+            return {"ok": True, "saved": 0, "skipped": skipped,
+                    "msg": f"所选 {len(skipped)} 条记录正被其他端确认，已跳过（不重复入库）"}
+        r = _import_save({"records": to_save})
+        # _import_save 落库失败只返回 {"ok": False} 而不抛异常，必须显式检查；
+        # 失败要把抢占退回去（否则记录卡在 committing，租期 120 秒内无法重试）。
         if not r.get("ok"):
+            for sid in claimed:
+                store.release_staged(sid)
             return {"ok": False, "kept": True,
                     "msg": "落库失败，暂存记录已保留（可重试）", "detail": r}
-        ids = [rec.get("_staged_id") for rec in req["records"]
-               if rec.get("_staged_id")]
-        if ids:
-            store.discard_staged(ids)
-        else:
-            # 兼容旧调用：记录里没有 _staged_id（如直接 API 传的原始数据）时按旧语义清空
-            store.discard_staged()
+        # 落库成功才出队（只清本次抢占成功的那几条）
+        if claimed:
+            store.discard_staged(claimed)
+        if skipped:
+            r["msg"] = (r.get("msg") or "") + \
+                f"（另有 {len(skipped)} 条正被其他端确认，已跳过）"
+            r["skipped"] = skipped
         return r
     try:
         n = store.commit_staged()

@@ -472,7 +472,11 @@ class MemoryStore:
         return True, "ok"
 
     def forget(self, target: str, old_text: str):
-        """按子串删除一条记忆。返回 (ok, msg)。"""
+        """按子串删除一条记忆。返回 (ok, msg)。
+
+        ⚠️ 子串匹配 + 只删第一条命中是**对话侧「忘掉…」的既有语义**；HTTP 删除
+        入口（画像面板）应走 `forget_by_id`——两条条目存在包含关系时子串会删错。
+        """
         old_text = (old_text or "").strip()
         if not old_text:
             return False, "old_text 为空"
@@ -488,6 +492,45 @@ class MemoryStore:
             _export_markdown(conn)
         self.load()
         return True, "ok"
+
+    def forget_by_id(self, entry_id):
+        """按稳定主键精确删除一条记忆。返回 (ok, msg)。
+
+        画像面板的删除走这里：`/memory` 列表现在返回每条的 id，前端删谁传谁的
+        主键——即使两条条目内容有包含关系（「历史训练目标：练胸」vs「当前训练
+        目标：练胸」），也不会像子串匹配那样删错第一条。删除动作与 `forget`
+        完全一致（清 FTS 索引 → 删行 → 同步 Markdown 视图），不另开写库路径。
+        """
+        try:
+            entry_id = int(entry_id)
+        except (TypeError, ValueError):
+            return False, "id 必须是整数"
+        _ensure_schema()
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT id FROM entries WHERE id=?", (entry_id,)).fetchone()
+            if not row:
+                return False, "条目不存在或已删除"
+            _unindex_entry(conn, row["id"])
+            conn.execute("DELETE FROM entries WHERE id=?", (entry_id,))
+            _export_markdown(conn)
+        self.load()
+        return True, "ok"
+
+    def list_with_ids(self, target: str) -> list:
+        """返回某存储的条目列表，**每条带稳定主键**：[{"id": int, "text": str}, …]。
+
+        供 /memory 端点与画像面板的按 id 删除使用。`list_store` 返回纯字符串列表
+        的旧契约保持不变（对话侧多个消费点依赖它）。
+        """
+        if target not in _TARGETS:
+            return []
+        _ensure_schema()
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT id, content FROM entries WHERE target=? ORDER BY id", (target,)
+            ).fetchall()
+        return [{"id": r["id"], "text": r["content"]} for r in rows]
 
     # ----- 召回（词 + bigram 关键词得分，配了 embedding 再融合向量）-----
     def recall_relevant(self, query: str, limit: int = 5) -> list:
@@ -591,6 +634,14 @@ def remember(target: str, content: str):
 
 def forget(target: str, old_text: str):
     return _store.forget(target, old_text)
+
+
+def forget_by_id(entry_id):
+    return _store.forget_by_id(entry_id)
+
+
+def list_with_ids(target: str):
+    return _store.list_with_ids(target)
 
 
 def replace_all(target: str, entries: list):
