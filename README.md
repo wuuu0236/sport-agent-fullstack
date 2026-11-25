@@ -8,13 +8,15 @@
 > 各子 Agent 隔离执行，只回收摘要。**「拆解是模型的判断，派发/验收是代码的门控」**，  
 > 杜绝模型答跑偏还把结果硬塞给用户。
 
+> 📌 **文档导航**：本文件只讲**当前状态**（架构 / 功能 / 快速开始 / 验证）。按时间倒序的**完整版本迭代记录**见 [CHANGELOG.md](CHANGELOG.md)，文末「更新记录」一节给出最近版本摘要。面试讲法与追问应答见 `面试要点.md`。
+
 ## 项目亮点（为什么值得讲）
 
 1. **Claude Code 式主-从多 Agent 协作（分级触发 + LangGraph 编排）**——健身域问题统一由谭成义人格教练单 Agent 直答；  
    多专长协作任务才升级编排（由 `src/intent.py` 的 **LLM 结构化分类**判定，关键词规则仅作 mock/失败兜底）：主 Agent 用 LLM 把任务拆成结构化子任务（强 JSON schema，**拆几步、派给谁、写不写 @**、子 Agent 白名单校验），  
    再经**依赖校验**（`@sN` 漏引自动补、无效引用清除）后逐节点**代码门控派发**，只回收产出摘要（截断防超长），最后由主 Agent 亲自综合收口。  
    整个主循环是 **LangGraph StateGraph**（plan → validate → dispatch ⇄ → review → rewrite → synthesize），条件边表达分支而不是散落的 if。  
-   执行类子 Agent（记录解析 / 数据计算 / 康复知识库）以确定性代码为主，不依赖 LLM 自觉。  
+   记录解析 / 数据计算类子 Agent（recorder / analyst）全程为确定性代码、不调 LLM；康复知识库（clinician）以确定性知识库为主体，真实模式下仍会调一次 LLM 把知识组织成回复。  
    协作全程通过 **SSE 实时推送**到前端看板：拆解了哪几步、谁在跑、谁失败、谁产出，全部**肉眼可见**。
 2. **子 Agent 独立工作空间**——写库子 Agent（recorder）解析结果先进**暂存区**，主循环结束发 `pending_commit`  
    事件，前端确认后才 `/commit` 落库。图片导入同样先暂存（顺带修复「导入即入库」的 P0-3 回归）。  
@@ -39,14 +41,19 @@
 ## 多 Agent 协作机制（主-从分发）
 
 ```
-你点发送
-  ↓ 前端 Chat.vue —— 判断走编排 → EventSource 订阅 /api/orchestrate(SSE)
-  ↓ Java 网关 :8080 —— Orchestrator 薄转发：POST 8001/supervise?stream=1，读帧透传
+两条发送路径（都由用户在输入框触发）：
+  A) 普通发送 → 前端 useAgentChat.send() → POST /api/chat（一次性返回）
+     后端若判定需编排，会随响应带回 events[]，前端按 90ms 逐条回放成协作时间轴（非 SSE）
+  B) 手动点「多 Agent 编排」→ orchestrateNow() → EventSource 订阅 /api/orchestrate(SSE)
+     ——真正的 SSE 实时推送只在这条路径上
+
+  走不走编排由后端 src/intent.py 的 LLM 分类决定（与前端选哪条发送路径无关）
+  ↓ Java 网关 :8080 —— Orchestrator 薄转发：POST 8001/supervise?stream=1，读帧重组后透传
   ↓ Python 主 Agent :8001 —— LangGraph StateGraph（src/graph.py）
       start → plan(LLM 拆解→JSON steps；失败→按任务类型分档的代码兜底)
            → validate(依赖校验：@sN 漏引自动补、无效引用清除)
            → dispatch ⇄ dispatch（逐节点：替换@s1→调子Agent→空/哨兵判失败→agent_done|agent_error）
-           → review(三层：规则检查→换模型评审→结构化清单) ──ISSUES 且被评节点是 planner──→ rewrite(仅重写一次) → synthesize
+           → review(规则检查先短路 → 放行后一次带结构化清单的 LLM 评审；配 REVIEW_MODEL 则换模型做这次评审) ──ISSUES 且被评节点是 planner──→ rewrite(仅重写一次) → synthesize
            → synthesize(单步/最后成功步是 planner 且产出**可交付**（非空、非哨兵、非降级文案）才直接用；否则主 Agent 亲自 LLM 综合)
            → complete(output, final) → 若有暂存 → pending_commit(count, records)
   ↓ 子 Agent 独立执行 —— 上下文隔离（技能按主理 Agent 门控注入 `match_skills_for`：未声明 owner 全开放 / 同名才注入 / coach 例外吸收 clinician、expert；无对话历史 / 记忆按需召回 Top5；
@@ -56,8 +63,10 @@
 
 **子 Agent 名录**（`agent-service/src/agents/`），按实现方式分两类：
 
-- **执行型（确定性代码，不依赖 LLM 自觉）**：`recorder`(正则解析训练描述→暂存)、  
-  `analyst`(心率区间/TRIMP/渐进趋势计算)、`clinician`(疼痛排查/康复动作知识库 + 就医红线)；
+- **执行型（确定性代码，全程不调 LLM）**：`recorder`(正则解析训练描述→暂存)、  
+  `analyst`(心率区间/TRIMP/渐进趋势计算)；
+- **知识库型（确定性知识 + 一次 LLM 组织回复）**：`clinician`(疼痛排查/康复动作知识库 + 就医红线)——  
+  核心是确定性知识库（覆盖膝盖 / 下背 / 圆肩 / 足底 4 个部位），真实模式下调 LLM 把命中的知识组织成自然语言；
 - **生成型（LLM + 受控注入）**：`searcher`(联网搜索 + 诚实降级)、`expert`(知识问答 + 用户基线注入)、  
   `planner`(周报/计划综合，强制全量注入用户画像)、`memory`(长期记忆)、`scheduler`(日程提醒)、  
   `writer`(文案写作)、`general`(兜底)；
@@ -78,11 +87,11 @@
 | 层         | 技术                                                                          |
 | --------- | --------------------------------------------------------------------------- |
 | 前端        | Vue 3 + Vite（设计令牌体系 · **深/浅双主题** + 4 模块工作台 + 自研 SVG 图表 + SSE EventSource；多 Agent 协作走内联时间轴） |
-| 网关        | Spring Boot 3（薄转发：/api/chat、/api/import-image、/api/orchestrate、/api/commit） |
+| 网关        | Spring Boot 3（薄转发：/api/chat、/api/import-image、/api/orchestrate、/api/commit、/api/health） |
 | Agent 能力层 | Python + FastAPI 微服务 + **LangGraph StateGraph** 编排（plan → validate → dispatch → review → rewrite → synthesize）：10 个可派发子 Agent，另有 `reviewer` 评审节点与 `coach` 直答入口 |
 | 记忆        | **SQLite 唯一真源（WAL 并发）** + 双存储（关于用户 / 助理笔记）+ **jieba + FTS5 混合召回** + 冻结快照注入；Markdown 仅作只读视图；画像面板支持**按稳定 id 逐条删除**（`POST /memory/forget` body {"id":N}，精确删，内容有包含关系的条目不会误删）+ Skill 三级渐进加载                 |
 | 数据引擎      | SportStore 确定性计算：周聚合 / 周环比（缺口如实标注）/ 日负荷 / ACWR 急慢性负荷比（伤病风险）                 |
-| LLM       | DeepSeek `deepseek-v4-flash`（OpenAI 兼容接口，无 key 自动 mock 降级）                  |
+| LLM       | DeepSeek `deepseek-chat`（OpenAI 兼容接口，无 key 自动 mock 降级；此模型名现路由到 v4-flash 非思考模式，2026-11 实测可用） |
 
 
 ## 目录结构
@@ -138,13 +147,14 @@ sport-agent-fullstack/
 │       ├── constants/agents.ts     # 子 Agent 中文名 + 职责 + 图标 + 色相
 │       ├── views/           # Chat / DashboardView / PlanView / MemoryView
 │       └── api/client.ts    # chat / health / importImage / orchestrate(EventSource) / commitRecords / plan / memory
-├── start-all.bat       # 一键启动三服务（各自独立窗口；项目根由 %~dp0 自推导，可移到任意位置/多副本共存；启动前清空代理变量，防 TLS 被本机代理掐断）
+├── start-all.bat       # 一键启动三服务（各自独立窗口；项目根由 %~dp0 自推导，可移到任意位置/多副本共存；启动前清空代理变量防 TLS 被本机代理掐断；顶部内置 JDK/Node/Python 路径，运行时升级后需同步改）
 ├── AGENTS.md           # 项目规则：沟通语言 / 改动约束 / 测试要求 / 版本迭代
 ├── _token_check.py     # 诊断工具：子 Agent 上下文体量对照（全量记忆+20轮历史 vs 按需召回+关历史，打桩不触网）
 ├── docker-compose.yml  # 三服务编排（见下方「Docker 部署」说明，当前需补 Dockerfile）
 ├── .gitignore          # 排除 .env 密钥 / 构建产物 / 运行时数据
 ├── 架构方案.md         # 完整架构、接口契约、演进路线
-├── 谭成义健身视角.md / 谭成义减脂三分化计划.md   # 教练人格蒸馏来源（2026-08-23 联网调研：公开文字材料蒸馏，来源清单与诚实边界见视角.md 附录）
+├── 谭成义健身视角.md   # 教练人格蒸馏来源（2026-08-23 联网调研：公开文字材料蒸馏，来源清单与诚实边界见其附录）
+├── 谭成义减脂三分化计划.md   # 应用篇：基于视角.md 的 5 心智模型推导出的具体排期（非蒸馏来源）
 └── 面试要点.md         # 面试讲法与追问应答
 ```
 
@@ -195,7 +205,7 @@ Vite 默认绑 IPv6 `[::1]`，IPv4 的 127.0.0.1 连不上）。消息经 Vite �
 
 ## 一键启动（可选）
 
-项目根目录提供 `start-all.bat`，一次性拉起三个服务到各自独立窗口（已内置 JDK17 / Node / Python 路径）：
+项目根目录提供 `start-all.bat`，一次性拉起三个服务到各自独立窗口（JDK17 / Node / Python 路径已内置在脚本顶部，但**本机运行时版本会升级**——若某个窗口报"找不到命令/path"，按实际安装目录改脚本第 7 / 8 / 14 行的路径即可，例如 2026-11 实测 Node 从 `22.22.2-2` 升级到了 `22.22.2-6`）：
 
 ```bat
 start-all.bat
@@ -252,11 +262,13 @@ cd agent-service
 LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-ocr.txt`。
 
 
-## 当前已验证（端到端全通 ✅，最近复核 2026-09-13/14）
+## 当前已验证（端到端全通 ✅，最近复核 2026-09-20）
+
+> 以下记录跨多次迭代累积：9/13 为旧流水线时期的双路径实测；9/16 起编排层迁 LangGraph、记忆/暂存迁 SQLite、评审三层加固、画像删除、records 原子抢占等改动见 [CHANGELOG.md](CHANGELOG.md) 与各轮回归测试（当前 274 passed）。**9/13 的秒数与事件条数对应旧实现，仅供历史参考，不代表当前版本的实测值。**
 
 完整链路已实测跑通，三服务均 LISTENING（8001 / 8080 / 5173）：
 
-**双路径实测（2026-09-13，真实 LLM，6/6）**
+**双路径实测（2026-09-13，旧流水线时期，真实 LLM，6/6）**
 - ✅ coach 直答：「怎么练胸」6.2s /「我膝盖疼还能跑吗」4.8s（命中 `posture_relief`）
 - ✅ supervisor 编排：「帮我生成周报」27.4s /「总结这周的训练情况」21.6s（`mode=orchestrated`，携带 13 / 11 条 SSE 事件）
 - ✅ 边界不编排：「周报的格式是什么」「总结一下卧推要点」——谈论 ≠ 触发
@@ -300,7 +312,7 @@ LLM 调用不打真实 API（mock/打桩）。OCR 可选依赖见 `requirements-
     2 字词（膝盖/心率/卧推/增肌）全失效。所以索引列必须自己喂切好的 token。
   - 未配 `EMBED_API_KEY` 是**默认正常状态**（DeepSeek 不提供 embedding），纯关键词召回照常工作。
 - **训练记录展示**：`GET /sessions`（agent-service）返回最近训练；前端经 Vite 代理 `/agent/sessions` 拉取，
-  在聊天页顶部展示「最近训练」卡片。**训练记录本体**持久化在 `data/sessions/*.json`（与记忆库分开）。
+  供「训练数据」模块渲染图表（早期聊天页顶部的「最近训练」卡片已在 2026-08-20 重构时移除，避免与专属模块重复）。**训练记录本体**持久化在 `data/sessions/*.json`（与记忆库分开）。
 
 ## 诚实说明（尚未完成）
 - Docker 部署仍不可用（缺 Dockerfile；需先补 `.dockerignore` 排除 .env 与 data/）
@@ -364,6 +376,28 @@ agent-service 还提供：
 `docker-compose.yml` 已写好三服务编排（依赖 `depends_on` + 端口映射），但各服务目录下**尚未提供 `Dockerfile`**，
 因此 `docker compose up` 暂时跑不起来。开发阶段请按上方「快速开始」分别启动。
 补齐 `agent-service/Dockerfile`、`backend/Dockerfile`、`frontend/Dockerfile` 后即可切换为容器部署。
+
+## 更新记录（Changelog）
+
+> 完整迭代脉络（每轮的动机 / 修法 / 验证）见 **[CHANGELOG.md](CHANGELOG.md)**。这里只列主干里程碑，倒序排列。
+> 记录格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)：倒序 + 日期 + 变更分类；本项目按内部方案代号（P0/P1/P2）+ 测试用例数脉络组织。
+
+| 日期 | 版本 / 主题 | 类型 | 测试数 |
+|------|------------|------|--------|
+| 2026-09-20 | records 直提路径补原子抢占 + 画像按稳定 id 精确删除 | `Fixed` `Security` | 265 → **274** |
+| 2026-09-17 | 画像面板支持用户自主逐条删除（`POST /memory/forget`） | `Added` | 256 → 265 |
+| 2026-09-17 | 正常提问不再被塞进固定模板（修意图兜底四处叠加问题） | `Fixed` | 250 → 256 |
+| 2026-09-16 | 复查 6 项修复（截图导入闭环 / 评审门 / 原子抢占等） | `Fixed` `Security` | 223 → 250 |
+| 2026-09-16 | 代码审查 9 项修复（静默失败专项） | `Fixed` | 197 → 223 |
+| 2026-09-16 | 暂存队列迁 SQLite（WAL，重启不丢待确认记录） | `Changed` | 182 → 197 |
+| 2026-09-16 | 教练人格分层 + 知识层自进化通道（P1-3） | `Added` | — |
+| 2026-09-16 | 记忆迁 SQLite + jieba/FTS5 中文混合召回（P1-2） | `Changed` `Added` | — |
+| 2026-09-16 | 评审三层加固（P1-1） | `Added` `Security` | — |
+| 2026-09-16 | 编排层迁移 LangGraph StateGraph + LLM 意图分类（P0） | `Changed` `Added` | 第一轮大改 |
+| 2026-08-13 | 多 Agent 体系重设：硬编码流水线 → 主-从分发 | `Changed` | 架构级重构 |
+| 2026-08-12 之前 | Vue3 + Spring Boot 3 + Python FastAPI 全栈搭建 | `Added` | 项目起点 |
+
+**测试数演进主线**：`104 → 127 → 147 → 168 → 182 → 197 → 223 → 250 → 256 → 265 → 274`（每一跳都对应上表某轮的新增回归用例）。
 
 ## 演进路线
 
