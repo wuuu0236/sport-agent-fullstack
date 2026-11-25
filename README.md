@@ -91,7 +91,7 @@
 | Agent 能力层 | Python + FastAPI 微服务 + **LangGraph StateGraph** 编排（plan → validate → dispatch → review → rewrite → synthesize）：10 个可派发子 Agent，另有 `reviewer` 评审节点与 `coach` 直答入口 |
 | 记忆        | **SQLite 唯一真源（WAL 并发）** + 双存储（关于用户 / 助理笔记）+ **jieba + FTS5 混合召回** + 冻结快照注入；Markdown 仅作只读视图；画像面板支持**按稳定 id 逐条删除**（`POST /memory/forget` body {"id":N}，精确删，内容有包含关系的条目不会误删）+ Skill 三级渐进加载                 |
 | 数据引擎      | SportStore 确定性计算：周聚合 / 周环比（缺口如实标注）/ 日负荷 / ACWR 急慢性负荷比（伤病风险）                 |
-| LLM       | DeepSeek `deepseek-chat`（OpenAI 兼容接口，无 key 自动 mock 降级；此模型名现路由到 v4-flash 非思考模式，2026-11 实测可用） |
+| LLM       | DeepSeek `deepseek-chat`（OpenAI 兼容接口，无 key 自动 mock 降级）                     |
 
 
 ## 目录结构
